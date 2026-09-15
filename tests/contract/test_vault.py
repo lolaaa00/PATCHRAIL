@@ -1,0 +1,270 @@
+import pytest
+
+CLIENT = "0xC000000000000000000000000000000000000C"
+BUILDER = "0xB000000000000000000000000000000000000B"
+OTHER = "0xD000000000000000000000000000000000000D"
+REPO_URL = "https://github.com/org/repo"
+DEPLOY_URL = "https://app.example.com"
+REL_ADDR = "0xRE1000000000000000000000000000000000001"
+VAULT_ADDR = "0xVA1000000000000000000000000000000000001"
+
+REPO_EVIDENCE = "https://github.com/org/repo/commit/abc1234deadbeef"
+DEPLOY_EVIDENCE = "https://app.example.com/build/1"
+RELEASE_EVIDENCE = "https://github.com/org/repo/releases/tag/v1"
+
+
+def _sat(items, finding="SATISFIED", commit_match="YES", deployment_relation="MATCHES_RC"):
+    ev = ", ".join('{"source": "%s", "excerpt": "%s"}' % (s, e) for s, e in items)
+    return '{"finding": "%s", "commit_match": "%s", "deployment_relation": "%s", "evidence": [%s], "reason": "ok"}' % (
+        finding, commit_match, deployment_relation, ev,
+    )
+
+
+def _setup(release, stub, make_vault, total=1000, deadline_offset=1_000_000, gates=None):
+    stub.CURRENT_SENDER["value"] = CLIENT
+    pid = release.create_project("p1", BUILDER, "T", REPO_URL, DEPLOY_URL, 3, total, stub.CURRENT_TIME["value"] + deadline_offset)
+    gates = gates or [("quality", "repo", 4000, True, ""), ("deploy", "deploy", 6000, True, "quality")]
+    for gate_id, role, bps, mandatory, dep in gates:
+        release.add_gate(pid, gate_id, gate_id.title(), "Criterion long enough to pass validation for " + gate_id, "OTHER", [role], bps, mandatory, dep, "policy")
+    release.lock_definition(pid)
+
+    vault = make_vault(REL_ADDR)
+    stub.ContractAt.register(REL_ADDR, release)
+    stub.ContractAt.register(VAULT_ADDR, vault)
+    stub.CURRENT_SENDER["value"] = release.owner
+    release.set_vault_address(VAULT_ADDR)
+    return pid, vault
+
+
+def _fund(release, stub, vault, pid, total=1000):
+    stub.CURRENT_SENDER["value"] = CLIENT
+    stub.CURRENT_VALUE["value"] = total
+    vault.fund_project(pid)
+    release.sync_funding_status(pid)
+
+
+def _submit_and_satisfy(release, stub, pid, gate_id, url, content, excerpt):
+    stub.CURRENT_SENDER["value"] = BUILDER
+    if release.get_project(pid).current_rc_revision == 0:
+        release.submit_release_candidate(pid, "abc1234deadbeef", REPO_EVIDENCE, DEPLOY_EVIDENCE, RELEASE_EVIDENCE, "")
+    stub.WEB_FIXTURES[url] = content
+    resp = _sat([(list(release.get_gate(pid, gate_id).evidence_requirements)[0], excerpt)])
+    stub.PROMPT_QUEUE.extend([resp, resp])
+    return release.evaluate_gate(pid, gate_id)
+
+
+# ---------------------------------------------------------------------------
+# Funding
+# ---------------------------------------------------------------------------
+
+def test_fund_requires_exact_amount(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    stub.CURRENT_SENDER["value"] = CLIENT
+    stub.CURRENT_VALUE["value"] = 999
+    with pytest.raises(Exception):
+        vault.fund_project(pid)
+
+
+def test_fund_requires_client_sender(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    stub.CURRENT_SENDER["value"] = OTHER
+    stub.CURRENT_VALUE["value"] = 1000
+    with pytest.raises(Exception):
+        vault.fund_project(pid)
+
+
+def test_fund_requires_locked_definition(release, stub, make_vault):
+    stub.CURRENT_SENDER["value"] = CLIENT
+    pid = release.create_project("p2", BUILDER, "T", REPO_URL, DEPLOY_URL, 3, 1000, stub.CURRENT_TIME["value"] + 1000)
+    release.add_gate(pid, "quality", "Quality", "Criterion long enough to pass validation", "OTHER", ["repo"], 10000, True, "", "policy")
+    # not locked
+    vault = make_vault(REL_ADDR)
+    stub.ContractAt.register(REL_ADDR, release)
+    stub.CURRENT_SENDER["value"] = CLIENT
+    stub.CURRENT_VALUE["value"] = 1000
+    with pytest.raises(Exception):
+        vault.fund_project(pid)
+
+
+def test_cannot_fund_twice(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    stub.CURRENT_SENDER["value"] = CLIENT
+    stub.CURRENT_VALUE["value"] = 1000
+    with pytest.raises(Exception):
+        vault.fund_project(pid)
+
+
+def test_funding_syncs_release_status(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    assert release.get_project(pid).status == "DRAFT"
+    _fund(release, stub, vault, pid, total=1000)
+    assert release.get_project(pid).status == "FUNDED"
+
+
+# ---------------------------------------------------------------------------
+# Claiming
+# ---------------------------------------------------------------------------
+
+def test_no_early_payment_before_satisfied(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    with pytest.raises(Exception):
+        vault.claim_gate(pid, "quality")
+
+
+def test_claim_pays_deterministic_bps_share(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    amount = vault.claim_gate(pid, "quality")
+    assert amount == 400
+    assert stub.TRANSFERS == [(BUILDER, 400)]
+
+
+def test_claim_gate_exactly_once(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    vault.claim_gate(pid, "quality")
+    with pytest.raises(Exception):
+        vault.claim_gate(pid, "quality")
+
+
+def test_claim_beneficiary_is_always_the_builder(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    stub.CURRENT_SENDER["value"] = OTHER  # arbitrary caller triggers settlement
+    vault.claim_gate(pid, "quality")
+    assert stub.TRANSFERS == [(BUILDER, 400)]
+
+
+def test_claim_rolls_back_on_transfer_failure_and_allows_retry(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    stub.TRANSFER_FAILURES.add(BUILDER)
+    with pytest.raises(Exception):
+        vault.claim_gate(pid, "quality")
+    assert vault.is_claimed(pid, "quality") is False
+    stub.TRANSFER_FAILURES.discard(BUILDER)
+    amount = vault.claim_gate(pid, "quality")
+    assert amount == 400
+    assert stub.TRANSFERS == [(BUILDER, 400)]
+
+
+def test_conservation_full_lifecycle(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    vault.claim_gate(pid, "quality")
+    _submit_and_satisfy(release, stub, pid, "deploy", DEPLOY_EVIDENCE, "Build 1 is live running commit abc1234deadbeef.", "is live running commit abc1234deadbeef")
+    vault.claim_gate(pid, "deploy")
+    assert release.get_project(pid).status == "ACCEPTED"
+    total_paid = sum(v for _, v in stub.TRANSFERS)
+    assert total_paid == 1000
+    assert vault.get_released_total(pid) == 1000
+
+
+# ---------------------------------------------------------------------------
+# Expiry / refund
+# ---------------------------------------------------------------------------
+
+def test_refund_requires_funded(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    with pytest.raises(Exception):
+        vault.refund_unearned(pid)
+
+
+def test_refund_blocked_before_deadline(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000, deadline_offset=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    with pytest.raises(Exception):
+        vault.refund_unearned(pid)
+
+
+def test_refund_after_expiry_returns_unearned_remainder_only(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000, deadline_offset=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    vault.claim_gate(pid, "quality")
+    stub.CURRENT_TIME["value"] += 2000
+    refunded = vault.refund_unearned(pid)
+    assert refunded == 600
+    assert sorted(stub.TRANSFERS) == sorted([(BUILDER, 400), (CLIENT, 600)])
+
+
+def test_builder_keeps_earned_release_after_expiry(release, stub, make_vault):
+    """A gate satisfied before expiry is carved out of the refund pool and
+    stays claimable by the builder even after the deadline passes."""
+    pid, vault = _setup(release, stub, make_vault, total=1000, deadline_offset=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    stub.CURRENT_TIME["value"] += 2000  # expire without claiming quality yet
+    refundable = vault.get_refundable_estimate(pid)
+    assert refundable == 600  # the satisfied-but-unclaimed 400 is reserved, not refundable
+    amount = vault.claim_gate(pid, "quality")
+    assert amount == 400
+    refunded = vault.refund_unearned(pid)
+    assert refunded == 600
+    assert sorted(stub.TRANSFERS) == sorted([(BUILDER, 400), (CLIENT, 600)])
+
+
+def test_cannot_double_refund(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000, deadline_offset=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    stub.CURRENT_TIME["value"] += 2000
+    vault.refund_unearned(pid)
+    with pytest.raises(Exception):
+        vault.refund_unearned(pid)
+
+
+def test_no_refund_after_full_acceptance(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000, deadline_offset=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    vault.claim_gate(pid, "quality")
+    _submit_and_satisfy(release, stub, pid, "deploy", DEPLOY_EVIDENCE, "Build 1 is live running commit abc1234deadbeef.", "is live running commit abc1234deadbeef")
+    vault.claim_gate(pid, "deploy")
+    stub.CURRENT_TIME["value"] += 2000
+    with pytest.raises(Exception):
+        vault.refund_unearned(pid)
+
+
+# ---------------------------------------------------------------------------
+# Cross-contract binding robustness
+# ---------------------------------------------------------------------------
+
+def test_vault_rejects_construction_without_release_address(make_vault):
+    with pytest.raises(Exception):
+        make_vault("")
+
+
+def test_wrong_gate_id_raises(release, stub, make_vault):
+    pid, vault = _setup(release, stub, make_vault, total=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    with pytest.raises(Exception):
+        vault.claim_gate(pid, "no-such-gate")
+
+
+def test_vault_refuses_funds_if_bps_do_not_sum_to_10000(release, stub, make_vault):
+    """Defense in depth: even though PatchrailRelease enforces bps==10000 at
+    lock time, the vault independently re-verifies before ever accepting a
+    deposit, and must never credit funds against a broken definition."""
+    stub.CURRENT_SENDER["value"] = CLIENT
+    pid = release.create_project("p3", BUILDER, "T", REPO_URL, DEPLOY_URL, 3, 1000, stub.CURRENT_TIME["value"] + 1000)
+    release.add_gate(pid, "quality", "Quality", "Criterion long enough to pass validation", "OTHER", ["repo"], 10000, True, "", "policy")
+    release.lock_definition(pid)
+
+    vault = make_vault(REL_ADDR)
+    stub.ContractAt.register(REL_ADDR, release)
+
+    # Tamper with the locked project directly to simulate a corrupted/foreign
+    # Release instance reporting an inconsistent gate table.
+    release.gates[release._gate_key(pid, "quality")].payment_bps = 9000
+
+    stub.CURRENT_SENDER["value"] = CLIENT
+    stub.CURRENT_VALUE["value"] = 1000
+    with pytest.raises(Exception):
+        vault.fund_project(pid)

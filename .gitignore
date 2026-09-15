@@ -1,0 +1,16 @@
+node_modules/
+.next/
+out/
+dist/
+.env
+.env.local
+.env*.local
+*.tsbuildinfo
+.DS_Store
+npm-debug.log*
+coverage/
+docs/DEPLOYMENT_RECORD.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.vercel

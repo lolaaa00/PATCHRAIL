@@ -1,0 +1,48 @@
+{
+  "name": "patchrail",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:contracts": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/contract",
+    "test:all": "npm run test:contracts && npm run test",
+    "contracts:compile-check": "python3 -m py_compile contracts/patchrail_release.py contracts/patchrail_vault.py",
+    "check:network": "tsx scripts/check-network.ts"
+  },
+  "dependencies": {
+    "clsx": "2.1.1",
+    "framer-motion": "^12.43.0",
+    "genlayer-js": "1.1.8",
+    "lucide-react": "0.462.0",
+    "next": "16.3.5",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "viem": "2.21.54",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "22.9.0",
+    "@types/react": "19.0.1",
+    "@types/react-dom": "19.0.2",
+    "eslint": "9.36.0",
+    "eslint-config-next": "16.3.5",
+    "jsdom": "25.0.1",
+    "postcss": "8.5.28",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.19.2",
+    "typescript": "5.6.3",
+    "vitest": "3.2.7"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

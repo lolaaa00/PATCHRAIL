@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Verify canonical network configuration (chain 61999)
+        run: npm run check:network
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Contract preflight — Python compiles cleanly
+        run: npm run contracts:compile-check
+
+      - name: Install contract test dependencies
+        run: pip install pytest
+
+      - name: Contract unit tests (local stub harness)
+        run: npm run test:contracts
+
+      - name: Frontend unit tests
+        run: npm run test
+
+      - name: Production build
+        run: npm run build
+
+  live-studionet-tests:
+    # Opt-in only: requires a funded Studionet signer supplied as a repo
+    # secret. Never runs on forks / pull_request events, and does nothing
+    # unless STUDIONET_PRIVATE_KEY is configured by a maintainer.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-and-test
+    environment: studionet-live
+    env:
+      HAS_SIGNER: ${{ secrets.STUDIONET_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Live deploy + smoke test against Studionet
+        if: env.HAS_SIGNER == 'true'
+        env:
+          PRIVATE_KEY: ${{ secrets.STUDIONET_PRIVATE_KEY }}
+        run: npx tsx scripts/deploy.ts
+      - name: Skip (no funded signer configured)
+        if: env.HAS_SIGNER != 'true'
+        run: echo "STUDIONET_PRIVATE_KEY secret not set — skipping live deployment job."

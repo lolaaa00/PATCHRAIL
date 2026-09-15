@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: var(--ff-display), ui-sans-serif, system-ui, sans-serif;
+  --font-ui: var(--ff-ui), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--ff-mono), ui-monospace, monospace;
+
+  --color-midnight: #10131a;
+  --color-phosphor: #eef2ea;
+  --color-green: #55c98a;
+  --color-coral: #f05a55;
+  --color-blue: #3b63ff;
+  --color-titanium: #8b94a3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+html {
+  background: var(--color-midnight);
+  color: var(--color-phosphor);
+}
+
+body {
+  min-height: 100vh;
+}
+
+.rail-track {
+  background-image: repeating-linear-gradient(
+    to right,
+    color-mix(in srgb, var(--color-titanium) 35%, transparent) 0,
+    color-mix(in srgb, var(--color-titanium) 35%, transparent) 1px,
+    transparent 1px,
+    transparent 28px
+  );
+}
+
+.lamp {
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 30%, transparent);
+}
+
+::selection {
+  background: var(--color-blue);
+  color: var(--color-phosphor);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
+}
