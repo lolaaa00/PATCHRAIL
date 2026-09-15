@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { CheckCircle2, XCircle } from "lucide-react";
 import { createProjectSchema, addGateSchema, gateBpsSumSchema } from "@/lib/validation/schemas";
 import { useReleaseWrite } from "@/lib/contract/useContracts";
 import { useTxLifecycle } from "@/lib/contract/txLifecycle";
@@ -323,10 +324,11 @@ export function NewProjectForm() {
       </Button>
 
       {steps.length > 0 && (
-        <ol className="flex flex-col gap-1 font-mono text-xs">
+        <ol className="flex flex-col gap-1.5 font-mono text-xs">
           {steps.map((s, i) => (
-            <li key={i} className={s.ok ? "text-green" : "text-coral"}>
-              {s.ok ? "✓" : "✗"} {s.label} {s.error ? `— ${s.error}` : ""}
+            <li key={i} className={`flex items-center gap-2 ${s.ok ? "text-green" : "text-coral"}`}>
+              {s.ok ? <CheckCircle2 size={14} aria-hidden /> : <XCircle size={14} aria-hidden />}
+              {s.label} {s.error ? `— ${s.error}` : ""}
             </li>
           ))}
         </ol>

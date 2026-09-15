@@ -1,5 +1,6 @@
 "use client";
 
+import { ExternalLink } from "lucide-react";
 import { explorerTxUrl } from "@/lib/genlayer/explorer";
 import type { LifecycleState } from "@/lib/contract/txLifecycle";
 
@@ -47,9 +48,10 @@ export function LifecycleTracker({ state }: { state: LifecycleState }) {
           href={explorerTxUrl(state.txHash)}
           target="_blank"
           rel="noreferrer"
-          className="mt-3 inline-block font-mono text-xs text-blue underline"
+          className="mt-3 inline-flex items-center gap-1 font-mono text-xs text-blue underline"
         >
-          View transaction on explorer →
+          View transaction on explorer
+          <ExternalLink size={12} aria-hidden />
         </a>
       )}
     </div>

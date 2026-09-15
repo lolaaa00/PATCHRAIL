@@ -2,6 +2,7 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
+import { ExternalLink } from "lucide-react";
 import { useReleaseRead } from "@/lib/contract/useContracts";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { ReleaseCandidateRecord, GateFindingRecord } from "@/lib/contract/types";
@@ -92,10 +93,11 @@ function EvidenceLink({ label, url }: { label: string; url: string }) {
   return (
     <div className="flex items-center justify-between gap-4">
       <dt className="font-mono text-[11px] uppercase tracking-wide text-titanium">{label}</dt>
-      <dd className="truncate">
-        <a href={url} target="_blank" rel="noreferrer" className="text-blue underline">
+      <dd className="flex items-center gap-1 truncate">
+        <a href={url} target="_blank" rel="noreferrer" className="truncate text-blue underline">
           {url}
         </a>
+        <ExternalLink size={12} className="shrink-0 text-blue" aria-hidden />
       </dd>
     </div>
   );
