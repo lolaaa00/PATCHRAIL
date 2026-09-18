@@ -8,13 +8,27 @@ const HTTPS_URL = z
   .refine((v) => !/:\/\/[^/]*@/.test(v), "must not embed credentials")
   .refine((v) => {
     const host = v.slice("https://".length).split("/")[0]?.toLowerCase() ?? "";
+    const hostOnly = host.split(":")[0] ?? "";
+    const secondOctet = Number(hostOnly.split(".")[1]);
+    const isPrivate172 = hostOnly.startsWith("172.") && secondOctet >= 16 && secondOctet <= 31;
     return (
-      !["localhost", "127.0.0.1", "0.0.0.0", "::1"].some((f) => host === f || host.startsWith(f)) &&
-      !host.startsWith("10.") &&
-      !host.startsWith("192.168.") &&
-      !host.startsWith("169.254.") &&
-      !host.startsWith("127.")
+      !["localhost", "127.0.0.1", "0.0.0.0", "::1"].some((f) => hostOnly === f || hostOnly.startsWith(f)) &&
+      !hostOnly.startsWith("10.") &&
+      !hostOnly.startsWith("192.168.") &&
+      !hostOnly.startsWith("169.254.") &&
+      !hostOnly.startsWith("127.") &&
+      !hostOnly.startsWith("100.64.") &&
+      !hostOnly.endsWith(".local") &&
+      !hostOnly.endsWith(".internal") &&
+      !isPrivate172
     );
+    // Note: this is a string-level check on the literal host in the URL —
+    // it cannot detect a public-looking hostname that a DNS rebinding attack
+    // later resolves to a private address at fetch time. The contract-side
+    // check (contracts/patchrail_release.py::_validate_url) has the same
+    // limitation; see docs/SECURITY.md for the residual risk and why GenVM's
+    // evidence fetch (not this client-side form) is the actual trust
+    // boundary for anything security-relevant.
   }, "must not resolve to a private/local host");
 
 export const idSchema = z
@@ -35,6 +49,13 @@ export const gateTypeSchema = z.enum([
 ]);
 
 export const evidenceRoleSchema = z.enum(["repo", "deploy", "release", "tests"]);
+
+export const sourcePolicySchema = z.enum([
+  "ANY_HTTPS",
+  "MUST_MATCH_PROJECT_REPO_HOST",
+  "MUST_MATCH_PROJECT_DEPLOY_HOST",
+  "MUST_MATCH_BOTH_PROJECT_HOSTS",
+]);
 
 export const createProjectSchema = z
   .object({
@@ -62,9 +83,9 @@ export const addGateSchema = z
     gateType: gateTypeSchema,
     evidenceRequirements: z.array(evidenceRoleSchema).min(1).max(4),
     paymentBps: z.coerce.number().int().min(1).max(10000),
-    mandatory: z.boolean(),
+    mandatory: z.literal(true),
     dependencyGateId: z.string().max(64).default(""),
-    sourcePolicy: z.string().min(1).max(300),
+    sourcePolicy: sourcePolicySchema,
   })
   .refine((v) => v.dependencyGateId !== v.gateId, {
     message: "a gate cannot depend on itself",

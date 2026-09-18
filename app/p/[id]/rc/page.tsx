@@ -57,7 +57,14 @@ export default function SubmitRcPage({ params }: { params: Promise<{ id: string 
         }),
       wait: (hash) => waitForFinality(release.client, hash),
       reread: async () => {
-        await release.adapter.getProject(id);
+        const reloaded = await release.adapter.getProject(id);
+        if (reloaded.status !== "RELEASE_CANDIDATE") {
+          throw new Error(`Project status after submit is '${reloaded.status}', expected RELEASE_CANDIDATE`);
+        }
+        const rcIds = await release.adapter.listRcIds(id);
+        if (rcIds.length !== reloaded.current_rc_revision) {
+          throw new Error("Re-read RC list does not match the project's new current_rc_revision");
+        }
       },
     });
     if (result.stage === "STATE_REREAD") {

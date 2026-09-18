@@ -39,14 +39,25 @@ export default function FundProjectPage({ params }: { params: Promise<{ id: stri
       write: () => vaultWrite.adapter.fundProject(id, BigInt(project.total_payment_amount)),
       wait: (hash) => waitForFinality(vaultWrite.client, hash),
       reread: async () => {
-        await vaultWrite.adapter.isFunded(id);
+        const funded = await vaultWrite.adapter.isFunded(id);
+        if (!funded) {
+          throw new Error("Vault re-read after a finalized deposit still reports is_funded() = false");
+        }
       },
     });
     if (result.stage !== "STATE_REREAD") return;
 
     setSyncing(true);
     try {
-      await releaseWrite.adapter.syncFundingStatus(id);
+      const syncHash = await releaseWrite.adapter.syncFundingStatus(id);
+      const syncResult = await waitForFinality(releaseWrite.client, syncHash);
+      if (syncResult.status === "ERROR") {
+        throw new Error(syncResult.message ?? "sync_funding_status execution failed");
+      }
+      const synced = await releaseWrite.adapter.getProject(id);
+      if (synced.status !== "FUNDED") {
+        throw new Error(`PatchrailRelease status after sync is '${synced.status}', expected FUNDED`);
+      }
       router.push(`/p/${id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Funding succeeded but syncing PatchrailRelease's status failed — retry from the project page.");

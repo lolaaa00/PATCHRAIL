@@ -28,6 +28,7 @@ between two Intelligent Contracts.
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from genlayer import *
 
@@ -42,14 +43,32 @@ MIN_COMMIT_SHA_LEN = 7
 
 GATE_TYPES = ("CODE_QUALITY", "DOCUMENTATION", "DEPLOYMENT", "BEHAVIOR", "SECURITY_DISCLOSURE", "OTHER")
 EVIDENCE_ROLES = ("repo", "deploy", "release", "tests")
+SOURCE_POLICIES = (
+    "ANY_HTTPS",
+    "MUST_MATCH_PROJECT_REPO_HOST",
+    "MUST_MATCH_PROJECT_DEPLOY_HOST",
+    "MUST_MATCH_BOTH_PROJECT_HOSTS",
+)
 
 PROJECT_STATUSES = ("DRAFT", "FUNDED", "ACTIVE", "RELEASE_CANDIDATE", "ACCEPTED", "EXPIRED", "CANCELLED")
 FINDINGS = ("SATISFIED", "NOT_SATISFIED", "INCONCLUSIVE", "UNAVAILABLE")
 COMMIT_MATCHES = ("YES", "NO", "UNCLEAR")
 DEPLOYMENT_RELATIONS = ("MATCHES_RC", "STALE", "UNRELATED", "UNCLEAR")
 
-PRIVATE_HOST_PREFIXES = ("10.", "192.168.", "169.254.", "127.")
+PRIVATE_HOST_PREFIXES = ("10.", "192.168.", "169.254.", "127.", "100.64.")
 PRIVATE_HOSTS = ("localhost", "0.0.0.0", "::1")
+
+
+def _is_private_172_range(host: str) -> bool:
+    # 172.16.0.0/12 == 172.16.0.0 - 172.31.255.255 (second octet 16-31).
+    parts = host.split(".")
+    if len(parts) < 2 or parts[0] != "172":
+        return False
+    try:
+        second = int(parts[1])
+    except ValueError:
+        return False
+    return 16 <= second <= 31
 
 
 def _digest(*parts) -> str:
@@ -81,8 +100,10 @@ def _validate_url(url: str) -> str:
     if not url or len(url) > MAX_URL_LEN:
         raise Exception("URL is empty or exceeds max length: " + str(url)[:80])
     host = _extract_host(url)
-    if host in PRIVATE_HOSTS or any(host.startswith(p) for p in PRIVATE_HOST_PREFIXES):
+    if host in PRIVATE_HOSTS or any(host.startswith(p) for p in PRIVATE_HOST_PREFIXES) or _is_private_172_range(host):
         raise Exception("URL must not resolve to a private/local host: " + url)
+    if host.endswith(".local") or host.endswith(".internal"):
+        raise Exception("URL must not target a reserved local/internal domain suffix: " + url)
     return host
 
 
@@ -321,6 +342,16 @@ class PatchrailRelease(gl.Contract):
             raise Exception("criterion must state a material, checkable condition")
         if int(payment_bps) <= 0 or int(payment_bps) > 10000:
             raise Exception("payment_bps out of bounds")
+        if not mandatory:
+            # Every gate on this rail carries a fixed slice of the total
+            # payment_bps pool. If a gate could be optional, final ACCEPTED
+            # status (which only requires mandatory gates) could leave that
+            # gate's payment_bps permanently unclaimable and unrefundable —
+            # funds trapped in the vault forever. To make that impossible by
+            # construction, every payment-bearing gate must be mandatory.
+            raise Exception("Every gate must be mandatory — optional gates would trap their payment_bps share")
+        if source_policy not in SOURCE_POLICIES:
+            raise Exception("Invalid source_policy: " + str(source_policy))
         if len(evidence_requirements) == 0:
             raise Exception("At least one evidence requirement is required")
         for role in evidence_requirements:
@@ -364,13 +395,41 @@ class PatchrailRelease(gl.Contract):
             raise Exception("At least one gate is required")
         total_bps = 0
         mandatory_count = 0
-        canon_parts = [project.project_id, project.title, project.repo_url, project.deploy_url, str(int(project.total_payment_amount))]
+        canon_parts = [
+            project.project_id,
+            str(project.client),
+            str(project.builder),
+            project.title,
+            project.repo_url,
+            project.deploy_url,
+            str(int(project.max_rc_revisions)),
+            str(int(project.total_payment_amount)),
+            str(int(project.deadline)),
+        ]
         for gid in gate_ids:
             g = self.gates[self._gate_key(project_id, gid)]
             total_bps += int(g.payment_bps)
             if g.mandatory:
                 mandatory_count += 1
-            canon_parts.append(gid + "|" + g.gate_type + "|" + str(int(g.payment_bps)) + "|" + str(g.mandatory) + "|" + g.dependency_gate_id)
+            # Every field that changes what a gate materially requires must be
+            # sealed here — label/criterion/evidence_requirements/source_policy
+            # included — so the definition_hash can independently prove the
+            # complete agreed terms, not just the payout split.
+            canon_parts.append(
+                "|".join(
+                    [
+                        gid,
+                        g.label,
+                        g.criterion,
+                        g.gate_type,
+                        ",".join(g.evidence_requirements),
+                        str(int(g.payment_bps)),
+                        str(g.mandatory),
+                        g.dependency_gate_id,
+                        g.source_policy,
+                    ]
+                )
+            )
         if total_bps != 10000:
             raise Exception("Gate payment_bps must sum exactly to 10000, got " + str(total_bps))
         if mandatory_count == 0:
@@ -505,6 +564,18 @@ class PatchrailRelease(gl.Contract):
             return "YES"
         if len(needle_short) >= 7 and needle_short in haystack:
             return "YES"
+
+        # The claimed commit is not present verbatim. Before falling back to
+        # UNCLEAR (insufficient evidence), check whether the page actually
+        # names a *different* commit — a repo/commit page that clearly
+        # advertises other full-length git hashes but not the claimed one is
+        # evidence of an actual mismatch (NO), not merely thin evidence.
+        # Without this, a clearly wrong deployment is indistinguishable from
+        # a page that simply doesn't mention any hash at all.
+        other_hashes = set(re.findall(r"\b[0-9a-f]{40}\b", haystack))
+        other_hashes |= set(re.findall(r"\b[0-9a-f]{64}\b", haystack))
+        if other_hashes and needle_full not in other_hashes:
+            return "NO"
         return "UNCLEAR"
 
     def _valid_excerpt(self, excerpt, content) -> bool:
@@ -516,7 +587,35 @@ class PatchrailRelease(gl.Contract):
             return True
         return excerpt.lower() in content.lower()
 
-    def _observe_once(self, gate: Gate, rc: ReleaseCandidate) -> dict:
+    def _source_policy_violation(self, project: Project, gate: Gate, rc: ReleaseCandidate) -> str:
+        """Deterministically enforce the gate's source_policy against the RC's
+        own registered evidence URLs, before any content is even fetched.
+        This depends only on on-chain state (project/gate/rc), so leader and
+        validator always compute the identical result — it cannot diverge."""
+        policy = gate.source_policy
+        if policy == "ANY_HTTPS":
+            return ""
+        repo_host = _extract_host(project.repo_url)
+        deploy_host = _extract_host(project.deploy_url)
+        if policy in ("MUST_MATCH_PROJECT_REPO_HOST", "MUST_MATCH_BOTH_PROJECT_HOSTS"):
+            if "repo" in gate.evidence_requirements and _extract_host(rc.repo_evidence_url) != repo_host:
+                return "repo evidence host does not match the project's registered repository host"
+        if policy in ("MUST_MATCH_PROJECT_DEPLOY_HOST", "MUST_MATCH_BOTH_PROJECT_HOSTS"):
+            if "deploy" in gate.evidence_requirements and _extract_host(rc.deployment_url) != deploy_host:
+                return "deployment evidence host does not match the project's registered deployment host"
+        return ""
+
+    def _observe_once(self, project: Project, gate: Gate, rc: ReleaseCandidate) -> dict:
+        policy_violation = self._source_policy_violation(project, gate, rc)
+        if policy_violation:
+            return {
+                "finding": "NOT_SATISFIED",
+                "commit_match": "UNCLEAR",
+                "deployment_relation": "UNCLEAR",
+                "evidence": [],
+                "reason": "source_policy violation: " + policy_violation,
+            }
+
         source_urls = {
             "repo": rc.repo_evidence_url,
             "deploy": rc.deployment_url,
@@ -627,6 +726,26 @@ class PatchrailRelease(gl.Contract):
             finding = "INCONCLUSIVE"
             reason = "downgraded: no evidence excerpt could be verified verbatim against fetched sources"
 
+        # Fail-closed: SATISFIED must be materially consistent with the
+        # commit/deployment checks this gate actually requires evidence for.
+        # A model could otherwise assert SATISFIED in its prose while the
+        # structured commit_match/deployment_relation fields it itself
+        # reported (or that the deterministic scan reported) contradict it —
+        # e.g. commit_match UNCLEAR/NO, or deployment_relation STALE/
+        # UNRELATED/UNCLEAR. These fields must gate the outcome, not merely
+        # describe it.
+        if finding == "SATISFIED":
+            if "repo" in gate.evidence_requirements and commit_match != "YES":
+                finding = "NOT_SATISFIED" if commit_match == "NO" else "INCONCLUSIVE"
+                reason = "downgraded: repo evidence is required but commit_match is " + str(commit_match)
+            elif "deploy" in gate.evidence_requirements and deployment_relation != "MATCHES_RC":
+                finding = (
+                    "NOT_SATISFIED" if deployment_relation in ("STALE", "UNRELATED") else "INCONCLUSIVE"
+                )
+                reason = "downgraded: deployment evidence is required but deployment_relation is " + str(
+                    deployment_relation
+                )
+
         return {
             "finding": finding,
             "commit_match": commit_match,
@@ -657,6 +776,13 @@ class PatchrailRelease(gl.Contract):
                 return False
         return True
 
+    def _normalize_excerpt(self, excerpt: str) -> str:
+        return " ".join(str(excerpt).split()).strip().lower()
+
+    def _evidence_multiset(self, evidence) -> list:
+        pairs = [(str(item["source"]), self._normalize_excerpt(item["excerpt"])) for item in evidence]
+        return sorted(pairs)
+
     def _candidates_match(self, a, b) -> bool:
         if a.get("finding") != b.get("finding"):
             return False
@@ -664,9 +790,13 @@ class PatchrailRelease(gl.Contract):
             return False
         if a.get("deployment_relation") != b.get("deployment_relation"):
             return False
-        a_sources = sorted(item["source"] for item in a.get("evidence", []))
-        b_sources = sorted(item["source"] for item in b.get("evidence", []))
-        if a_sources != b_sources:
+        # Compare the exact (source, excerpt) multiset — ordering-independent
+        # but content-exact — rather than just the set of source names.
+        # Otherwise two validators could cite materially different excerpts
+        # from the same source (or a different number of excerpts) and still
+        # be treated as agreeing, which defeats the purpose of requiring
+        # independently-grounded evidence.
+        if self._evidence_multiset(a.get("evidence", [])) != self._evidence_multiset(b.get("evidence", [])):
             return False
         return True
 
@@ -684,6 +814,22 @@ class PatchrailRelease(gl.Contract):
         rc_id = self._rc_key(project_id, project.current_rc_revision)
         rc = self.rcs[rc_id]
 
+        # A (project, gate, RC) evaluation is decided exactly once. Without
+        # this, a later re-evaluation of the *same* RC could overwrite a
+        # recorded SATISFIED finding with NOT_SATISFIED/INCONCLUSIVE while
+        # leaving satisfied_rc[gate_key] still pointing at this rc_id — a
+        # state where the vault's authorization and the latest displayed
+        # finding materially disagree. A gate that must be retried belongs
+        # to a new RC revision (per the spec: a failed gate creates a new RC
+        # revision, never a mutated old record), not a repeated evaluation
+        # of the same frozen evidence.
+        finding_id = self._finding_key(project_id, gate_id, rc_id)
+        if finding_id in self.findings:
+            raise Exception(
+                "Gate '" + gate_id + "' has already been evaluated for this release candidate revision — "
+                "submit a new release candidate to retry"
+            )
+
         if gate.dependency_gate_id:
             dep_key = project_id + ":" + gate.dependency_gate_id
             if self.satisfied_rc.get(dep_key, "") != rc_id:
@@ -692,7 +838,7 @@ class PatchrailRelease(gl.Contract):
                 )
 
         def leader_fn():
-            return self._observe_once(gate, rc)
+            return self._observe_once(project, gate, rc)
 
         def validator_fn(leader_result) -> bool:
             if not isinstance(leader_result, gl.vm.Return):
@@ -700,7 +846,7 @@ class PatchrailRelease(gl.Contract):
             candidate = leader_result.calldata
             if not self._valid_shape(candidate):
                 return False
-            expected = self._observe_once(gate, rc)
+            expected = self._observe_once(project, gate, rc)
             if not self._valid_shape(expected):
                 return False
             return self._candidates_match(candidate, expected)
@@ -721,8 +867,8 @@ class PatchrailRelease(gl.Contract):
         for item in outcome["evidence"]:
             evidence_items.append(EvidenceItem(source=item["source"], excerpt=item["excerpt"]))
 
-        finding_id = self._finding_key(project_id, gate_id, rc_id)
-        is_new = finding_id not in self.findings
+        # finding_id was already proven absent above (immutability guard),
+        # so this write is always a first-and-only write for this key.
         self.findings[finding_id] = GateFinding(
             finding_id=finding_id,
             project_id=project_id,
@@ -735,8 +881,7 @@ class PatchrailRelease(gl.Contract):
             reason=outcome["reason"],
             evaluated_at=self._now(),
         )
-        if is_new:
-            self.finding_ids_by_project[project_id].append(finding_id)
+        self.finding_ids_by_project[project_id].append(finding_id)
 
         if outcome["finding"] == "SATISFIED":
             self.satisfied_rc[gate_key] = rc_id

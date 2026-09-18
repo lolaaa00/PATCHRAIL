@@ -12,7 +12,7 @@ import { LifecycleTracker } from "@/components/LifecycleTracker";
 import { Button } from "@/components/ui/Button";
 import { FieldWrapper, TextArea, TextInput, Select } from "@/components/ui/Field";
 import { useWallet } from "@/lib/wallet/WalletContext";
-import type { GateType, EvidenceRole } from "@/lib/contract/types";
+import type { GateType, EvidenceRole, SourcePolicy } from "@/lib/contract/types";
 
 type DraftGate = {
   gateId: string;
@@ -21,9 +21,8 @@ type DraftGate = {
   gateType: GateType;
   evidenceRequirements: EvidenceRole[];
   paymentPct: string;
-  mandatory: boolean;
   dependencyGateId: string;
-  sourcePolicy: string;
+  sourcePolicy: SourcePolicy;
 };
 
 const EMPTY_GATE: DraftGate = {
@@ -33,12 +32,17 @@ const EMPTY_GATE: DraftGate = {
   gateType: "CODE_QUALITY",
   evidenceRequirements: ["repo"],
   paymentPct: "",
-  mandatory: true,
   dependencyGateId: "",
-  sourcePolicy: "Validators must independently fetch and inspect the cited sources; builder-authored summaries are not evidence.",
+  sourcePolicy: "MUST_MATCH_BOTH_PROJECT_HOSTS",
 };
 
 const EVIDENCE_OPTIONS: EvidenceRole[] = ["repo", "deploy", "release", "tests"];
+const SOURCE_POLICY_OPTIONS: SourcePolicy[] = [
+  "MUST_MATCH_BOTH_PROJECT_HOSTS",
+  "MUST_MATCH_PROJECT_REPO_HOST",
+  "MUST_MATCH_PROJECT_DEPLOY_HOST",
+  "ANY_HTTPS",
+];
 
 function toUnixSeconds(datetimeLocal: string): number {
   return Math.floor(new Date(datetimeLocal).getTime() / 1000);
@@ -123,7 +127,7 @@ export function NewProjectForm() {
         gateType: g.gateType,
         evidenceRequirements: g.evidenceRequirements,
         paymentBps: bpsList[i],
-        mandatory: g.mandatory,
+        mandatory: true as const,
         dependencyGateId: g.dependencyGateId,
         sourcePolicy: g.sourcePolicy,
       }),
@@ -153,7 +157,10 @@ export function NewProjectForm() {
         }),
       wait: (hash) => waitForFinality(release.client, hash),
       reread: async () => {
-        await release.adapter.getProject(projectId);
+        const created = await release.adapter.getProject(projectId);
+        if (created.status !== "DRAFT") {
+          throw new Error(`New project status is '${created.status}', expected DRAFT`);
+        }
       },
     });
     localSteps.push({ label: "Create project", ok: createResult.stage === "STATE_REREAD", error: createResult.errorMessage ?? undefined });
@@ -172,7 +179,10 @@ export function NewProjectForm() {
         write: () => release.adapter.addGate(data),
         wait: (hash) => waitForFinality(release.client, hash),
         reread: async () => {
-          await release.adapter.getGate(projectId, data.gateId);
+          const created = await release.adapter.getGate(projectId, data.gateId);
+          if (created.payment_bps !== data.paymentBps || created.gate_type !== data.gateType) {
+            throw new Error(`Re-read gate '${data.gateId}' does not match what was submitted`);
+          }
         },
       });
       localSteps.push({ label: `Add gate: ${data.label}`, ok: result.stage === "STATE_REREAD", error: result.errorMessage ?? undefined });
@@ -188,7 +198,10 @@ export function NewProjectForm() {
       write: () => release.adapter.lockDefinition(projectId),
       wait: (hash) => waitForFinality(release.client, hash),
       reread: async () => {
-        await release.adapter.getProject(projectId);
+        const locked = await release.adapter.getProject(projectId);
+        if (!locked.definition_locked || !locked.definition_hash) {
+          throw new Error("Project re-read after lock still reports definition_locked = false");
+        }
       },
     });
     localSteps.push({ label: "Lock definition", ok: lockResult.stage === "STATE_REREAD", error: lockResult.errorMessage ?? undefined });
@@ -290,7 +303,24 @@ export function NewProjectForm() {
                 <TextInput id={`gate-dep-${i}`} value={g.dependencyGateId} onChange={(e) => updateGate(i, { dependencyGateId: e.target.value })} placeholder="quality" />
               </FieldWrapper>
             </div>
-            <div className="flex flex-wrap gap-4">
+            <FieldWrapper
+              label="Source policy"
+              htmlFor={`gate-policy-${i}`}
+              hint="Which registered project host(s) the RC's evidence URLs for this gate must match."
+            >
+              <Select
+                id={`gate-policy-${i}`}
+                value={g.sourcePolicy}
+                onChange={(e) => updateGate(i, { sourcePolicy: e.target.value as SourcePolicy })}
+              >
+                {SOURCE_POLICY_OPTIONS.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </Select>
+            </FieldWrapper>
+            <div className="flex flex-wrap items-center gap-4">
               {EVIDENCE_OPTIONS.map((role) => (
                 <label key={role} className="flex items-center gap-2 font-mono text-xs uppercase tracking-wide text-titanium">
                   <input
@@ -307,10 +337,9 @@ export function NewProjectForm() {
                   {role}
                 </label>
               ))}
-              <label className="ml-auto flex items-center gap-2 font-mono text-xs uppercase tracking-wide text-titanium">
-                <input type="checkbox" checked={g.mandatory} onChange={(e) => updateGate(i, { mandatory: e.target.checked })} />
-                Mandatory
-              </label>
+              <span className="ml-auto font-mono text-[11px] uppercase tracking-wide text-titanium">
+                Every gate is mandatory
+              </span>
             </div>
           </div>
         ))}

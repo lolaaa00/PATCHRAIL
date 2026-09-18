@@ -83,7 +83,18 @@ export default function GatesPage({ params }: { params: Promise<{ id: string }> 
       chainId: wallet.chainId,
       write: () => releaseWrite.adapter.evaluateGate(id, gateId),
       wait: (hash) => waitForFinality(releaseWrite.client, hash),
-      reread: load,
+      reread: async () => {
+        const rcIds = await releaseWrite.adapter.listRcIds(id);
+        const latestRc = rcIds[rcIds.length - 1];
+        if (!latestRc) {
+          throw new Error("Re-read after evaluation found no release candidate");
+        }
+        const finding = await releaseWrite.adapter.getFinding(id, gateId, latestRc);
+        if (!finding || finding.rc_id !== latestRc) {
+          throw new Error("Re-read did not find a finding recorded for this evaluation");
+        }
+        await load();
+      },
     });
     setBusyGate(null);
   }
@@ -95,7 +106,13 @@ export default function GatesPage({ params }: { params: Promise<{ id: string }> 
       chainId: wallet.chainId,
       write: () => vaultWrite.adapter.claimGate(id, gateId),
       wait: (hash) => waitForFinality(vaultWrite.client, hash),
-      reread: load,
+      reread: async () => {
+        const isClaimed = await vaultWrite.adapter.isClaimed(id, gateId);
+        if (!isClaimed) {
+          throw new Error("Vault re-read after a finalized claim still reports is_claimed() = false");
+        }
+        await load();
+      },
     });
     setBusyGate(null);
   }
@@ -107,7 +124,13 @@ export default function GatesPage({ params }: { params: Promise<{ id: string }> 
       chainId: wallet.chainId,
       write: () => vaultWrite.adapter.refundUnearned(id),
       wait: (hash) => waitForFinality(vaultWrite.client, hash),
-      reread: load,
+      reread: async () => {
+        const isRefunded = await vaultWrite.adapter.isRefunded(id);
+        if (!isRefunded) {
+          throw new Error("Vault re-read after a finalized refund still reports is_refunded() = false");
+        }
+        await load();
+      },
     });
     setBusyGate(null);
   }
@@ -119,7 +142,13 @@ export default function GatesPage({ params }: { params: Promise<{ id: string }> 
       chainId: wallet.chainId,
       write: () => releaseWrite.adapter.expireProject(id),
       wait: (hash) => waitForFinality(releaseWrite.client, hash),
-      reread: load,
+      reread: async () => {
+        const reloaded = await releaseWrite.adapter.getProject(id);
+        if (reloaded.status !== "EXPIRED") {
+          throw new Error(`Project status after expire is '${reloaded.status}', expected EXPIRED`);
+        }
+        await load();
+      },
     });
     setBusyGate(null);
   }
@@ -143,7 +172,7 @@ export default function GatesPage({ params }: { params: Promise<{ id: string }> 
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <p className="font-mono text-[11px] uppercase tracking-wide text-titanium">
-                  {gate.gate_type} · {(gate.payment_bps / 100).toFixed(2)}% · {gate.mandatory ? "mandatory" : "optional"}
+                  {gate.gate_type} · {(gate.payment_bps / 100).toFixed(2)}% · {gate.source_policy}
                   {gate.dependency_gate_id ? ` · depends on ${gate.dependency_gate_id}` : ""}
                 </p>
                 <p className="mt-1 font-display text-xl">{gate.label}</p>

@@ -36,6 +36,18 @@ describe("createProjectSchema", () => {
     expect(createProjectSchema.safeParse({ ...base, deployUrl: "https://localhost:3000" }).success).toBe(false);
   });
 
+  it("rejects a 172.16.0.0/12 private-range deploy URL", () => {
+    expect(createProjectSchema.safeParse({ ...base, deployUrl: "https://172.20.0.5" }).success).toBe(false);
+  });
+
+  it("accepts a 172.x host outside the private /12 range", () => {
+    expect(createProjectSchema.safeParse({ ...base, deployUrl: "https://172.99.0.5" }).success).toBe(true);
+  });
+
+  it("rejects a CGNAT (100.64.0.0/10) deploy URL", () => {
+    expect(createProjectSchema.safeParse({ ...base, deployUrl: "https://100.64.1.1" }).success).toBe(false);
+  });
+
   it("rejects a deadline in the past", () => {
     expect(createProjectSchema.safeParse({ ...base, deadline: Math.floor(Date.now() / 1000) - 10 }).success).toBe(false);
   });
@@ -50,13 +62,21 @@ describe("addGateSchema", () => {
     gateType: "CODE_QUALITY" as const,
     evidenceRequirements: ["repo" as const],
     paymentBps: 2500,
-    mandatory: true,
+    mandatory: true as const,
     dependencyGateId: "",
-    sourcePolicy: "policy",
+    sourcePolicy: "MUST_MATCH_BOTH_PROJECT_HOSTS" as const,
   };
 
   it("accepts a valid gate", () => {
     expect(addGateSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("rejects an optional (non-mandatory) gate", () => {
+    expect(addGateSchema.safeParse({ ...base, mandatory: false }).success).toBe(false);
+  });
+
+  it("rejects a free-text source policy", () => {
+    expect(addGateSchema.safeParse({ ...base, sourcePolicy: "some free text" }).success).toBe(false);
   });
 
   it("rejects a gate depending on itself", () => {

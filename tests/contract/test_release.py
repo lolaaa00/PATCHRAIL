@@ -29,8 +29,8 @@ def _create_basic_project(release, stub, max_rc=3, deadline_offset=1_000_000, to
 
 
 def _add_two_gates(release, project_id):
-    release.add_gate(project_id, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 4000, True, "", "policy")
-    release.add_gate(project_id, "deploy", "Deploy", "Deployment must be live and match the RC commit", "DEPLOYMENT", ["deploy"], 6000, True, "quality", "policy")
+    release.add_gate(project_id, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 4000, True, "", "MUST_MATCH_BOTH_PROJECT_HOSTS")
+    release.add_gate(project_id, "deploy", "Deploy", "Deployment must be live and match the RC commit", "DEPLOYMENT", ["deploy"], 6000, True, "quality", "MUST_MATCH_BOTH_PROJECT_HOSTS")
 
 
 def _submit_rc(release, stub, project_id, commit="abc1234deadbeef", test_url=""):
@@ -72,28 +72,37 @@ def test_add_gate_only_by_client(release, stub):
     pid = _create_basic_project(release, stub)
     stub.CURRENT_SENDER["value"] = OTHER
     with pytest.raises(Exception):
-        release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 4000, True, "", "policy")
+        release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 4000, True, "", "MUST_MATCH_BOTH_PROJECT_HOSTS")
 
 
 def test_add_gate_rejects_unknown_dependency(release, stub):
     pid = _create_basic_project(release, stub)
     with pytest.raises(Exception):
-        release.add_gate(pid, "deploy", "Deploy", "Deployment must be live and match the RC commit", "DEPLOYMENT", ["deploy"], 10000, True, "quality", "policy")
+        release.add_gate(pid, "deploy", "Deploy", "Deployment must be live and match the RC commit", "DEPLOYMENT", ["deploy"], 10000, True, "quality", "MUST_MATCH_BOTH_PROJECT_HOSTS")
 
 
 def test_lock_definition_requires_bps_sum_10000(release, stub):
     pid = _create_basic_project(release, stub)
-    release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 4000, True, "", "policy")
-    release.add_gate(pid, "deploy", "Deploy", "Deployment must be live and match the RC commit", "DEPLOYMENT", ["deploy"], 5000, True, "quality", "policy")
+    release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 4000, True, "", "MUST_MATCH_BOTH_PROJECT_HOSTS")
+    release.add_gate(pid, "deploy", "Deploy", "Deployment must be live and match the RC commit", "DEPLOYMENT", ["deploy"], 5000, True, "quality", "MUST_MATCH_BOTH_PROJECT_HOSTS")
     with pytest.raises(Exception):
         release.lock_definition(pid)
 
 
-def test_lock_definition_requires_at_least_one_mandatory_gate(release, stub):
+def test_add_gate_rejects_optional_gate(release, stub):
+    """Every gate must be mandatory — an optional gate could leave its
+    payment_bps share permanently trapped once the project reaches ACCEPTED
+    (which only requires mandatory gates), since ACCEPTED projects cannot be
+    refunded. This is rejected at add_gate, not merely at lock_definition."""
     pid = _create_basic_project(release, stub)
-    release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 10000, False, "", "policy")
     with pytest.raises(Exception):
-        release.lock_definition(pid)
+        release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 10000, False, "", "MUST_MATCH_BOTH_PROJECT_HOSTS")
+
+
+def test_add_gate_rejects_invalid_source_policy(release, stub):
+    pid = _create_basic_project(release, stub)
+    with pytest.raises(Exception):
+        release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 10000, True, "", "free text is not a policy")
 
 
 def test_definition_immutable_after_lock(release, stub):
@@ -101,7 +110,7 @@ def test_definition_immutable_after_lock(release, stub):
     _add_two_gates(release, pid)
     release.lock_definition(pid)
     with pytest.raises(Exception):
-        release.add_gate(pid, "extra", "Extra", "Some extra criterion long enough", "OTHER", ["repo"], 1, True, "", "policy")
+        release.add_gate(pid, "extra", "Extra", "Some extra criterion long enough", "OTHER", ["repo"], 1, True, "", "MUST_MATCH_BOTH_PROJECT_HOSTS")
     with pytest.raises(Exception):
         release.lock_definition(pid)
 
@@ -199,8 +208,10 @@ def test_deterministic_commit_scan_overrides_model_claim(release, stub, make_vau
     """When the contract's own deterministic substring scan of the fetched
     repo page finds the RC's commit hash, that YES/NO verdict is binding —
     the model may only supply its own commit_match when the scan is
-    itself UNCLEAR."""
-    pid, vault = _funded_project(release, stub, make_vault)
+    itself UNCLEAR. Each scenario uses its own RC revision: a (project, gate,
+    RC) evaluation is decided exactly once, so retrying against different
+    evidence means submitting a new RC, not re-evaluating the same one."""
+    pid, vault = _funded_project(release, stub, make_vault, max_rc=3)
     _submit_rc(release, stub, pid, commit="abc1234deadbeef")
     stub.WEB_FIXTURES[REPO_EVIDENCE] = "This page never mentions any commit hash at all."
     resp = _satisfied_response([("repo", "never mentions any commit hash")], commit_match="YES")
@@ -211,13 +222,85 @@ def test_deterministic_commit_scan_overrides_model_claim(release, stub, make_vau
     assert finding.commit_match == "YES"
 
     stub.reset_fixtures()
+    _submit_rc(release, stub, pid, commit="abc1234deadbeef")
     stub.WEB_FIXTURES[REPO_EVIDENCE] = "Commit abc1234deadbeef is present verbatim on this page."
     resp2 = _satisfied_response([("repo", "is present verbatim on this page")], commit_match="NO")
     stub.PROMPT_QUEUE.extend([resp2, resp2])
     release.evaluate_gate(pid, "quality")
-    finding2 = release.get_finding(pid, "quality", release.list_rc_ids(pid)[0])
+    finding2 = release.get_finding(pid, "quality", release.list_rc_ids(pid)[-1])
     # deterministic scan found the hash -> overrides the model's incorrect "NO" claim
     assert finding2.commit_match == "YES"
+
+
+def test_evaluate_gate_is_immutable_once_recorded(release, stub, make_vault):
+    """A (project, gate, RC revision) finding can never be re-evaluated —
+    the fix for the audited bug where a later re-evaluation of the same RC
+    could overwrite a SATISFIED finding with a worse one while leaving the
+    vault's satisfied_rc authorization pointed at the now-contradicted RC."""
+    pid, vault = _funded_project(release, stub, make_vault)
+    _submit_rc(release, stub, pid)
+    stub.WEB_FIXTURES[REPO_EVIDENCE] = "Commit abc1234deadbeef fixes lint errors."
+    resp = _satisfied_response([("repo", "fixes lint errors")])
+    stub.PROMPT_QUEUE.extend([resp, resp])
+    assert release.evaluate_gate(pid, "quality") == "SATISFIED"
+    with pytest.raises(Exception):
+        release.evaluate_gate(pid, "quality")
+    # satisfied_rc must still point at the one recorded finding, unchanged
+    assert release.get_satisfied_rc_id(pid, "quality") == release.list_rc_ids(pid)[0]
+
+
+def test_deterministic_commit_mismatch_yields_no(release, stub, make_vault):
+    """A repo page that names a different full-length commit hash than the
+    one claimed by the RC is a real mismatch (NO), not merely insufficient
+    evidence (UNCLEAR) — and NOT_SATISFIED, not SATISFIED, since the gate
+    requires repo evidence and commit_match must be YES to satisfy it."""
+    pid, vault = _funded_project(release, stub, make_vault)
+    _submit_rc(release, stub, pid, commit="abc1234deadbeef")
+    stub.WEB_FIXTURES[REPO_EVIDENCE] = "This release is tagged at commit " + "f" * 40 + " only."
+    resp = _satisfied_response([("repo", "This release is tagged at commit " + "f" * 40)], commit_match="YES")
+    stub.PROMPT_QUEUE.extend([resp, resp])
+    assert release.evaluate_gate(pid, "quality") == "NOT_SATISFIED"
+    finding = release.get_finding(pid, "quality", release.list_rc_ids(pid)[0])
+    assert finding.commit_match == "NO"
+
+
+def test_satisfied_requires_material_checks_to_actually_pass(release, stub, make_vault):
+    """A model cannot assert SATISFIED while its own commit_match/
+    deployment_relation fields contradict it. The deploy gate here requires
+    'deploy' evidence, so deployment_relation must be MATCHES_RC."""
+    pid, vault = _funded_project(release, stub, make_vault)
+    _submit_rc(release, stub, pid)
+    stub.WEB_FIXTURES[REPO_EVIDENCE] = "Commit abc1234deadbeef fixes lint errors and adds tests."
+    stub.WEB_FIXTURES[DEPLOY_EVIDENCE] = "Build 1 is live running an older commit."
+    resp_q = _satisfied_response([("repo", "fixes lint errors and adds tests")])
+    stub.PROMPT_QUEUE.extend([resp_q, resp_q])
+    release.evaluate_gate(pid, "quality")
+    resp = _satisfied_response(
+        [("deploy", "Build 1 is live running an older commit")],
+        deployment_relation="STALE",
+    )
+    stub.PROMPT_QUEUE.extend([resp, resp])
+    assert release.evaluate_gate(pid, "deploy") == "NOT_SATISFIED"
+    finding = release.get_finding(pid, "deploy", release.list_rc_ids(pid)[0])
+    assert finding.deployment_relation == "STALE"
+
+
+def test_source_policy_violation_blocks_evaluation_without_model_call(release, stub, make_vault):
+    """The 'quality' gate on _add_two_gates uses MUST_MATCH_BOTH_PROJECT_HOSTS
+    (see _add_two_gates), so RC repo evidence hosted somewhere other than the
+    project's registered repo_url host must be rejected deterministically —
+    before any content is fetched or any model is called."""
+    pid, vault = _funded_project(release, stub, make_vault)
+    _as_builder(stub)
+    off_host_repo_evidence = "https://gitlab.com/org/repo/commit/abc1234deadbeef"
+    release.submit_release_candidate(pid, "abc1234deadbeef", off_host_repo_evidence, DEPLOY_EVIDENCE, RELEASE_EVIDENCE, "")
+    # No scripted prompt response is queued at all — if the policy check did
+    # not short-circuit before the model call, exec_prompt would raise and
+    # the finding would be INCONCLUSIVE, not the fail-closed NOT_SATISFIED
+    # this deterministic rejection actually produces.
+    assert release.evaluate_gate(pid, "quality") == "NOT_SATISFIED"
+    finding = release.get_finding(pid, "quality", release.list_rc_ids(pid)[0])
+    assert "source_policy" in finding.reason
 
 
 def test_forged_excerpt_downgrades_to_inconclusive(release, stub, make_vault):

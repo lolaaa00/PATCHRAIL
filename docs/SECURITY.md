@@ -13,15 +13,43 @@ Every URL a client, builder, or the contract itself handles — project `repo_ur
   what the contract fetches)
 - embedded credentials rejected (`user:pass@host`)
 - host canonicalized and checked against `localhost` / `0.0.0.0` / `::1` /
-  `10.*` / `192.168.*` / `169.254.*` / `127.*`
+  `10.*` / `192.168.*` / `169.254.*` / `127.*` / `100.64.*` (CGNAT) /
+  `172.16.0.0`–`172.31.255.255` (the full RFC 1918 `172.16.0.0/12` block, checked by
+  parsing the second octet rather than a literal-prefix match) / any `*.local` or
+  `*.internal` suffix
 - an RC's four evidence URLs cannot all canonicalize to the same page
   (`submit_release_candidate`'s distinct-host check)
+- each gate's `source_policy` (see below) is checked against the RC's actual evidence
+  URLs before anything is fetched
 - fetched content is bounded to `MAX_CONTENT_LEN` (3000 characters) per source before
   it ever reaches a prompt
 
 The same rules are mirrored client-side in `lib/validation/schemas.ts` (`HTTPS_URL`)
 so a user gets immediate feedback — but the contract is the actual enforcement
 boundary; the frontend check is a courtesy, not a substitute.
+
+**Residual risk — DNS rebinding.** Both checks above operate on the literal hostname
+string in the URL, at the time the URL is registered/validated. Neither can detect a
+public-looking hostname whose DNS record is later changed (or answers differently per
+resolver) to point at a private/internal address at the moment GenVM's own
+`gl.nondet.web.render` / `gl.nondet.web.get` actually performs the fetch. Defending
+against that class of attack requires resolving and pinning the IP at fetch time,
+which is a property of the GenVM runtime's fetch implementation, not something this
+contract can enforce from Python. This is a known, documented limitation rather than
+an oversight.
+
+## Source policy — which host a gate's evidence must come from
+
+Every gate declares a `source_policy` from a fixed enum (`add_gate` rejects anything
+else): `ANY_HTTPS`, `MUST_MATCH_PROJECT_REPO_HOST`, `MUST_MATCH_PROJECT_DEPLOY_HOST`,
+or `MUST_MATCH_BOTH_PROJECT_HOSTS`. `_source_policy_violation` enforces it
+deterministically, before any content is fetched: for a gate that requires `repo`
+evidence, `MUST_MATCH_PROJECT_REPO_HOST`/`_BOTH_` require the RC's
+`repo_evidence_url` host to equal the project's registered `repo_url` host; the
+`deploy` analog holds for `deployment_url` vs. `deploy_url`. A violation returns
+`NOT_SATISFIED` with a reason naming the mismatch — it never reaches the model, and
+because it depends only on on-chain state (project/gate/RC), leader and validator
+always compute the identical result.
 
 ## Fetched content is always hostile data
 
@@ -40,8 +68,25 @@ The contract proves that:
 - an evidence excerpt attributed to a source was actually present, verbatim, in the
   bytes the contract itself fetched from that source (`_valid_excerpt`);
 - a `commit_match` of `YES`/`NO` is never accepted from the model alone when the
-  contract's own deterministic scan already produced a definitive answer;
-- a `SATISFIED` finding always cites at least one such grounded excerpt.
+  contract's own deterministic scan already produced a definitive answer
+  (`_deterministic_commit_match` returns `NO`, not just `YES`/`UNCLEAR`, when the
+  fetched repo page names other full-length commit hashes but not the claimed one);
+- a `SATISFIED` finding always cites at least one such grounded excerpt;
+- a `SATISFIED` finding is fail-closed against the gate's own material checks: if the
+  gate requires `repo` evidence, `commit_match` must be `YES`; if it requires `deploy`
+  evidence, `deployment_relation` must be `MATCHES_RC` — otherwise the finding is
+  deterministically downgraded to `NOT_SATISFIED`/`INCONCLUSIVE` regardless of what
+  the model's prose or `finding` field claimed;
+- two validators are only considered to agree if their exact `(source, excerpt)`
+  evidence multisets match after whitespace/case normalization — not merely the same
+  set of source names — so citing different excerpts from the same source is a
+  disagreement, not a match (`_evidence_multiset` / `_candidates_match`);
+- once a `(project, gate, RC revision)` has been evaluated, it can never be
+  re-evaluated — `evaluate_gate` raises if a finding already exists for that exact key.
+  A gate that needs another attempt is retried on a **new RC revision**, per the
+  product's own "a failed gate creates a new RC revision, not a mutated old record"
+  rule — never by silently overwriting a previously SATISFIED finding (and the
+  `satisfied_rc` authorization the vault reads) with a worse one for the same RC.
 
 It does **not** prove that the fetched page is the "real" or canonical state of a
 GitHub repository or a production deployment — `gl.nondet.web.render` fetches whatever
@@ -66,9 +111,23 @@ needs and implements a full value-safety surface:
   `refund_unearned` always pays the project's `client`. `claim_gate` is deliberately
   permissionless (any caller may trigger it) precisely because the beneficiary can
   never be redirected — see `test_claim_beneficiary_is_always_the_builder`.
-- **No model-selected amount.** Every payout is `total_payment_amount * payment_bps
-  // 10000` — a fixed integer formula over values sealed before funding. The model
-  never sees or influences a GEN amount.
+- **No model-selected amount.** Every non-final gate's payout is `total_payment_amount
+  * payment_bps // 10000` — a fixed integer formula over values sealed before
+  funding. The model never sees or influences a GEN amount.
+- **No trapped funds from optional gates.** `add_gate` rejects `mandatory=False`
+  outright — every payment-bearing gate on a Patchrail rail is mandatory. Since final
+  `ACCEPTED` status requires every mandatory gate satisfied on one RC lineage, this
+  makes it structurally impossible to reach `ACCEPTED` while some gate's `payment_bps`
+  share is neither claimed nor claimable nor refundable.
+- **No rounding dust locked forever.** Floor division on each gate's own share can
+  leave the sum of all gates' floors below the sealed total by a few wei-equivalent
+  units. Rather than leaving that remainder unclaimable, the deterministically last
+  gate on the rail (highest `order_index` — the final-acceptance gate, since every
+  gate is mandatory) is paid the exact remainder (`total - sum of every other gate's
+  floor`) instead of its own floor share, so the full deposit is always exactly
+  claimable once every gate is satisfied and claimed (`_gate_payout_amount` in
+  `patchrail_vault.py`, shared by `claim_gate`, `get_gate_payout_amount`, and the
+  refund-estimate path so all three always agree).
 - **Exact-once claiming.** `claimed[project:gate]` is checked and set before any
   transfer is attempted; a second `claim_gate` call raises immediately.
 - **Storage updated before value moves, with rollback on failure.** `claimed[...]` and
@@ -88,6 +147,33 @@ needs and implements a full value-safety surface:
   structurally (each payout/refund is computed from the same fixed pool and
   decremented before transfer) and checked directly in
   `test_conservation_full_lifecycle` and `test_refund_after_expiry_returns_unearned_remainder_only`.
+
+## Finality parsing — never default to success
+
+`lib/genlayer/txWait.ts::waitForFinality` first confirms the receipt's `statusName`
+is actually `FINALIZED` (not merely returned, timed out, or canceled), then reads the
+per-validator `consensus_data.leader_receipt[].execution_result` field — the field
+actually present on real Studionet receipts — falling back to the SDK's derived
+`txExecutionResultName` only when no leader receipt is present. If neither source
+yields a recognized `FINISHED_WITH_RETURN` / `FINISHED_WITH_ERROR` value, the result
+is `ERROR`, not `SUCCESS` — a missing or unrecognized execution result is never
+silently treated as a successful write.
+
+## Frontend postconditions — a reread must prove the write actually happened
+
+Every write's `reread` callback (`lib/contract/txLifecycle.ts::useTxLifecycle`) is
+where `STATE_MISMATCH` is raised — the tx-lifecycle hook already treats a thrown
+`reread` as `STATE_MISMATCH`, and every page-level `reread` now re-fetches
+authoritative state and throws unless the exact expected postcondition holds:
+funding requires `is_funded() === true`; submitting an RC requires the project's
+status to have moved to `RELEASE_CANDIDATE` and the RC id list to match the new
+`current_rc_revision`; evaluating a gate requires a finding to actually exist for the
+new RC; claiming requires `is_claimed() === true`; refunding requires
+`is_refunded() === true`; expiring requires `status === "EXPIRED"`; and
+`sync_funding_status` (the one write that isn't driven through the lifecycle hook,
+because it's a secondary step after `fund_project`) is itself now awaited through
+`waitForFinality` and its result re-read before the UI ever navigates away, rather
+than being fire-and-forget against a bare tx hash.
 
 ## Secrets
 

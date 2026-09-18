@@ -17,6 +17,12 @@ export type GateType =
 
 export type EvidenceRole = "repo" | "deploy" | "release" | "tests";
 
+export type SourcePolicy =
+  | "ANY_HTTPS"
+  | "MUST_MATCH_PROJECT_REPO_HOST"
+  | "MUST_MATCH_PROJECT_DEPLOY_HOST"
+  | "MUST_MATCH_BOTH_PROJECT_HOSTS";
+
 export type Finding = "SATISFIED" | "NOT_SATISFIED" | "INCONCLUSIVE" | "UNAVAILABLE";
 export type CommitMatch = "YES" | "NO" | "UNCLEAR";
 export type DeploymentRelation = "MATCHES_RC" | "STALE" | "UNRELATED" | "UNCLEAR";
@@ -50,7 +56,7 @@ export type GateRecord = {
   payment_bps: number;
   mandatory: boolean;
   dependency_gate_id: string;
-  source_policy: string;
+  source_policy: SourcePolicy;
   order_index: number;
 };
 

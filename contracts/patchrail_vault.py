@@ -9,8 +9,14 @@ It holds one client's fixed total contract value per project, and releases
 fixed milestone percentages strictly gated on PatchrailRelease's own,
 GenLayer-validator-verified gate findings — read via `.view()` only, never
 trusted from a caller-supplied claim. No model ever decides a raw GEN
-amount: payout is `total * gate_bps // 10000`, a deterministic formula
-applied only after PatchrailRelease independently reports a gate SATISFIED.
+amount: every non-final gate pays `total * gate_bps // 10000`, a deterministic
+floor-division formula applied only after PatchrailRelease independently
+reports a gate SATISFIED. The deterministically last gate on the rail (the
+one with the highest order_index — every gate is mandatory, so this is
+always the final acceptance gate) is instead paid the exact remainder after
+all other gates' floors, so floor-division dust is never permanently
+unclaimable: the full sealed total is always exactly claimable once every
+gate is satisfied and claimed.
 
 Value-safety rules enforced here:
   - exact-once funding (deposit must equal the sealed total, no more, no
@@ -72,6 +78,27 @@ class PatchrailVault(gl.Contract):
             total += int(gate.payment_bps)
         return total
 
+    def _gate_payout_amount(self, project, release, gate_ids: list, gate_id: str) -> bigint:
+        """Deterministic per-gate payout. Floor division on every gate's own
+        `total * bps // 10000` share can leave a few wei of dust permanently
+        unclaimable once the sum of floors is less than the sealed total.
+        To guarantee the *entire* deposit is always eventually claimable (with
+        exact equality once every gate is claimed), the deterministically
+        last gate on the rail (highest order_index — by construction the
+        final acceptance gate, since every gate is mandatory and this is the
+        one gate that can only be satisfied once every other gate already
+        is) is paid the exact remainder rather than its own floor share."""
+        gates = [release.get_gate(project.project_id, gid) for gid in gate_ids]
+        final_gate = max(gates, key=lambda g: int(g.order_index))
+        if str(gate_id) == str(final_gate.gate_id):
+            others_bps = sum(int(g.payment_bps) for g in gates if str(g.gate_id) != str(gate_id))
+            others_amount = (project.total_payment_amount * bigint(others_bps)) // bigint(10000)
+            return project.total_payment_amount - others_amount
+        for g in gates:
+            if str(g.gate_id) == str(gate_id):
+                return (project.total_payment_amount * bigint(int(g.payment_bps))) // bigint(10000)
+        raise Exception("Gate does not exist")
+
     # ------------------------------------------------------------------
     # Funding — exact-once, defense-in-depth re-verified against Release
     # ------------------------------------------------------------------
@@ -115,11 +142,11 @@ class PatchrailVault(gl.Contract):
 
         release = self._release()
         project = release.get_project(project_id)
-        gate = release.get_gate(project_id, gate_id)
         if not release.gate_is_satisfied(project_id, gate_id):
             raise Exception("Gate is not SATISFIED — nothing to claim")
 
-        amount = (project.total_payment_amount * bigint(int(gate.payment_bps))) // bigint(10000)
+        gate_ids = release.list_gate_ids(project_id)
+        amount = self._gate_payout_amount(project, release, gate_ids, gate_id)
         current_released = self.released_total.get(project_id, bigint(0))
         deposited = self.deposited_amount.get(project_id, bigint(0))
         if current_released + amount > deposited:
@@ -147,14 +174,14 @@ class PatchrailVault(gl.Contract):
     def _reserved_unclaimed(self, project_id: str) -> bigint:
         release = self._release()
         project = release.get_project(project_id)
+        gate_ids = release.list_gate_ids(project_id)
         reserved = bigint(0)
-        for gid in release.list_gate_ids(project_id):
+        for gid in gate_ids:
             key = self._claim_key(project_id, gid)
             if self.claimed.get(key, False):
                 continue
             if release.gate_is_satisfied(project_id, gid):
-                gate = release.get_gate(project_id, gid)
-                reserved += (project.total_payment_amount * bigint(int(gate.payment_bps))) // bigint(10000)
+                reserved += self._gate_payout_amount(project, release, gate_ids, gid)
         return reserved
 
     @gl.public.view
@@ -237,8 +264,8 @@ class PatchrailVault(gl.Contract):
     def get_gate_payout_amount(self, project_id: str, gate_id: str) -> bigint:
         release = self._release()
         project = release.get_project(project_id)
-        gate = release.get_gate(project_id, gate_id)
-        return (project.total_payment_amount * bigint(int(gate.payment_bps))) // bigint(10000)
+        gate_ids = release.list_gate_ids(project_id)
+        return self._gate_payout_amount(project, release, gate_ids, gate_id)
 
 
 @gl.contract_interface

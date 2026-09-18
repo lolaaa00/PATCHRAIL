@@ -25,7 +25,7 @@ def _setup(release, stub, make_vault, total=1000, deadline_offset=1_000_000, gat
     pid = release.create_project("p1", BUILDER, "T", REPO_URL, DEPLOY_URL, 3, total, stub.CURRENT_TIME["value"] + deadline_offset)
     gates = gates or [("quality", "repo", 4000, True, ""), ("deploy", "deploy", 6000, True, "quality")]
     for gate_id, role, bps, mandatory, dep in gates:
-        release.add_gate(pid, gate_id, gate_id.title(), "Criterion long enough to pass validation for " + gate_id, "OTHER", [role], bps, mandatory, dep, "policy")
+        release.add_gate(pid, gate_id, gate_id.title(), "Criterion long enough to pass validation for " + gate_id, "OTHER", [role], bps, mandatory, dep, "MUST_MATCH_BOTH_PROJECT_HOSTS")
     release.lock_definition(pid)
 
     vault = make_vault(REL_ADDR)
@@ -76,7 +76,7 @@ def test_fund_requires_client_sender(release, stub, make_vault):
 def test_fund_requires_locked_definition(release, stub, make_vault):
     stub.CURRENT_SENDER["value"] = CLIENT
     pid = release.create_project("p2", BUILDER, "T", REPO_URL, DEPLOY_URL, 3, 1000, stub.CURRENT_TIME["value"] + 1000)
-    release.add_gate(pid, "quality", "Quality", "Criterion long enough to pass validation", "OTHER", ["repo"], 10000, True, "", "policy")
+    release.add_gate(pid, "quality", "Quality", "Criterion long enough to pass validation", "OTHER", ["repo"], 10000, True, "", "MUST_MATCH_BOTH_PROJECT_HOSTS")
     # not locked
     vault = make_vault(REL_ADDR)
     stub.ContractAt.register(REL_ADDR, release)
@@ -248,13 +248,39 @@ def test_wrong_gate_id_raises(release, stub, make_vault):
         vault.claim_gate(pid, "no-such-gate")
 
 
+def test_final_gate_absorbs_rounding_dust(release, stub, make_vault):
+    """Three gates at 3334/3333/3333 bps over a total of 1000 floor to
+    333/333/333 = 999, one unit short. The deterministically last gate
+    (highest order_index — 'final' here) must absorb that dust so the full
+    1000 is exactly claimable, not permanently stuck in the vault."""
+    gates = [("quality", "repo", 3334, True, ""), ("deploy", "deploy", 3333, True, ""), ("final", "release", 3333, True, "")]
+    pid, vault = _setup(release, stub, make_vault, total=1000, gates=gates)
+    _fund(release, stub, vault, pid, total=1000)
+
+    assert vault.get_gate_payout_amount(pid, "quality") == 333
+    assert vault.get_gate_payout_amount(pid, "deploy") == 333
+    # final gate gets the exact remainder, not its own floor (also 333)
+    assert vault.get_gate_payout_amount(pid, "final") == 1000 - 333 - 333
+
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    _submit_and_satisfy(release, stub, pid, "deploy", DEPLOY_EVIDENCE, "Build 1 is live running commit abc1234deadbeef.", "is live running commit abc1234deadbeef")
+    _submit_and_satisfy(release, stub, pid, "final", RELEASE_EVIDENCE, "Release notes for abc1234deadbeef.", "Release notes for abc1234deadbeef")
+
+    a1 = vault.claim_gate(pid, "quality")
+    a2 = vault.claim_gate(pid, "deploy")
+    a3 = vault.claim_gate(pid, "final")
+    assert a1 + a2 + a3 == 1000
+    assert vault.get_released_total(pid) == 1000
+    assert sum(v for _, v in stub.TRANSFERS) == 1000
+
+
 def test_vault_refuses_funds_if_bps_do_not_sum_to_10000(release, stub, make_vault):
     """Defense in depth: even though PatchrailRelease enforces bps==10000 at
     lock time, the vault independently re-verifies before ever accepting a
     deposit, and must never credit funds against a broken definition."""
     stub.CURRENT_SENDER["value"] = CLIENT
     pid = release.create_project("p3", BUILDER, "T", REPO_URL, DEPLOY_URL, 3, 1000, stub.CURRENT_TIME["value"] + 1000)
-    release.add_gate(pid, "quality", "Quality", "Criterion long enough to pass validation", "OTHER", ["repo"], 10000, True, "", "policy")
+    release.add_gate(pid, "quality", "Quality", "Criterion long enough to pass validation", "OTHER", ["repo"], 10000, True, "", "MUST_MATCH_BOTH_PROJECT_HOSTS")
     release.lock_definition(pid)
 
     vault = make_vault(REL_ADDR)
