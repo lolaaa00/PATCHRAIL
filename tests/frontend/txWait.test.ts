@@ -8,7 +8,32 @@ function clientReturning(receipt: unknown) {
 const HASH = "0xabc" as `0x${string}`;
 
 describe("waitForFinality", () => {
-  it("reports SUCCESS when the leader receipt execution_result is FINISHED_WITH_RETURN", async () => {
+  it("reports SUCCESS when the leader receipt execution_result is the real raw value 'SUCCESS'", async () => {
+    // Confirmed against a live Studionet deploy receipt — the raw
+    // leader_receipt execution_result value is "SUCCESS", not the SDK's
+    // declared ExecutionResult enum name "FINISHED_WITH_RETURN".
+    const client = clientReturning({
+      statusName: "FINALIZED",
+      consensus_data: { leader_receipt: [{ execution_result: "SUCCESS" }] },
+    });
+    const result = await waitForFinality(client, HASH);
+    expect(result.status).toBe("SUCCESS");
+  });
+
+  it("reports ERROR when the leader receipt execution_result is the real raw value 'ERROR'", async () => {
+    // Confirmed against a different live Studionet deploy receipt (one that
+    // genuinely failed with a contract-load NameError).
+    const client = clientReturning({
+      statusName: "FINALIZED",
+      consensus_data: { leader_receipt: [{ execution_result: "ERROR" }] },
+      data: { message: "NameError: name 'Any' is not defined" },
+    });
+    const result = await waitForFinality(client, HASH);
+    expect(result.status).toBe("ERROR");
+    expect(result.message).toContain("NameError");
+  });
+
+  it("also accepts the SDK's declared ExecutionResult enum name FINISHED_WITH_RETURN as success", async () => {
     const client = clientReturning({
       statusName: "FINALIZED",
       consensus_data: { leader_receipt: [{ execution_result: "FINISHED_WITH_RETURN" }] },

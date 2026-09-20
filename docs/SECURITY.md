@@ -154,10 +154,41 @@ needs and implements a full value-safety surface:
 is actually `FINALIZED` (not merely returned, timed out, or canceled), then reads the
 per-validator `consensus_data.leader_receipt[].execution_result` field — the field
 actually present on real Studionet receipts — falling back to the SDK's derived
-`txExecutionResultName` only when no leader receipt is present. If neither source
-yields a recognized `FINISHED_WITH_RETURN` / `FINISHED_WITH_ERROR` value, the result
-is `ERROR`, not `SUCCESS` — a missing or unrecognized execution result is never
-silently treated as a successful write.
+`txExecutionResultName` only when no leader receipt is present. Its real raw values,
+confirmed against two live Studionet deploy receipts (`scripts/deploy.ts` against a
+failed deploy and, after fixing the failure, a successful one), are the strings
+`"SUCCESS"` / `"ERROR"` — **not** the SDK's declared `ExecutionResult` TypeScript enum
+names (`FINISHED_WITH_RETURN` / `FINISHED_WITH_ERROR`), which appear to apply only to
+the different, top-level `txExecutionResultName` convenience field. Both vocabularies
+are accepted as recognized. If neither source yields a recognized value, the result is
+`ERROR`, not `SUCCESS` — a missing or unrecognized execution result is never silently
+treated as a successful write.
+
+This exact fail-closed behavior is what caught two real deploy-time contract bugs
+against live Studionet, instead of misreporting either as a successful deployment:
+
+- `from genlayer import *` does not export `Any` on the real runtime, so every
+  `@gl.public.view` method annotated `-> Any` crashed contract loading with
+  `NameError: name 'Any' is not defined`. Fixed by importing `Any` from `typing`
+  explicitly in both contracts.
+- The real GenVM storage system auto-initializes every class-level
+  `TreeMap[...]`/`DynArray[...]` annotation before a contract's own `__init__` runs;
+  manually reassigning `self.<field> = TreeMap()`/`DynArray()` for one of those is
+  rejected with `TypeError: this class can't be instantiated by user`. Fixed by
+  removing those assignments from both contracts' `__init__` methods — matching the
+  pattern already proven by `ANTECEDENT`, a sibling project in this batch that had
+  already deployed successfully to Studionet.
+
+Both bugs passed the full local pytest suite every time, because
+`tests/contract/genlayer_stub.py` — a hand-written stand-in for the real `genlayer`
+package, not a GenVM emulator — incorrectly modeled behavior the real runtime doesn't
+have (exporting `Any`, and silently accepting manual storage-field assignment). Both
+have since been fixed in the stub itself so it can no longer paper over the same class
+of bug; see the stub's own module docstring and inline comments for the specifics.
+This is a structural limit of any hand-written mock, not something a differently
+written test could have fully ruled out — it is the reason `docs/DEPLOYMENT.md`'s
+reviewer-demo path exists at all: a real deploy against the real network is the only
+thing that actually proves contract-loading correctness.
 
 ## Frontend postconditions — a reread must prove the write actually happened
 

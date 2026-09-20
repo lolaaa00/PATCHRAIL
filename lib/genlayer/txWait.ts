@@ -13,7 +13,16 @@ export type ReceiptLike = {
   txDataDecoded?: { contractAddress?: string };
 };
 
-const RECOGNIZED_EXECUTION_RESULTS = new Set(["FINISHED_WITH_RETURN", "FINISHED_WITH_ERROR"]);
+// Confirmed against two live Studionet receipts (one failed deploy, one
+// successful deploy): `consensus_data.leader_receipt[].execution_result`
+// actually carries the raw strings "SUCCESS" / "ERROR" — NOT the SDK's
+// declared `ExecutionResult` enum names ("FINISHED_WITH_RETURN" /
+// "FINISHED_WITH_ERROR"), which apparently only apply to the different,
+// top-level `txExecutionResultName` convenience field. Both vocabularies are
+// accepted here since only the leader-receipt field has been directly
+// observed live; `txExecutionResultName` is still only a documented fallback.
+const SUCCESS_EXECUTION_RESULTS = new Set(["SUCCESS", "FINISHED_WITH_RETURN"]);
+const ERROR_EXECUTION_RESULTS = new Set(["ERROR", "FINISHED_WITH_ERROR"]);
 
 /**
  * Fetches the finalized receipt and classifies its execution result. A
@@ -22,10 +31,13 @@ const RECOGNIZED_EXECUTION_RESULTS = new Set(["FINISHED_WITH_RETURN", "FINISHED_
  *
  * The authoritative per-validator field is `consensus_data.leader_receipt[].
  * execution_result` (present on real Studionet receipts even when the SDK's
- * derived `txExecutionResultName` convenience field is absent). We check the
- * leader receipts first and only fall back to `txExecutionResultName` when no
- * leader receipt is present. If neither source yields a recognized value,
- * this fails closed as ERROR rather than defaulting to success.
+ * derived `txExecutionResultName` convenience field is absent), and its real
+ * values are the raw strings "SUCCESS" / "ERROR" — confirmed against two live
+ * Studionet deploy receipts (one failed, one successful), not the SDK's
+ * declared `ExecutionResult` enum names. We check the leader receipts first
+ * and only fall back to `txExecutionResultName` when no leader receipt is
+ * present. If neither source yields a recognized value, this fails closed as
+ * ERROR rather than defaulting to success.
  *
  * Exported (not just `waitForFinality`) so any caller that also needs the
  * raw receipt — e.g. `scripts/deploy.ts` extracting a deployed contract
@@ -72,13 +84,13 @@ export async function getFinalizedReceipt(
     };
   }
 
-  if (resultsToCheck.some((r) => r === "FINISHED_WITH_ERROR")) {
+  if (resultsToCheck.some((r) => ERROR_EXECUTION_RESULTS.has(r))) {
     const data = receipt.data;
     const message = data && typeof data === "object" ? JSON.stringify(data) : "execution reverted";
     return { receipt, result: { status: "ERROR", message } };
   }
 
-  if (!resultsToCheck.every((r) => RECOGNIZED_EXECUTION_RESULTS.has(r))) {
+  if (!resultsToCheck.every((r) => SUCCESS_EXECUTION_RESULTS.has(r))) {
     return {
       receipt,
       result: {
