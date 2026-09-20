@@ -37,6 +37,9 @@ Value-safety rules enforced here:
 
 from dataclasses import dataclass
 from genlayer import *
+from typing import Any  # imported after `from genlayer import *` — see the
+# matching note in patchrail_release.py: the real GenVM runtime does not
+# export Any from genlayer itself.
 
 
 class PatchrailVault(gl.Contract):

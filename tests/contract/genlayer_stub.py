@@ -108,15 +108,6 @@ class bigint(int):
         return bigint(int(self) // int(other))
 
 
-class _AnyMeta(type):
-    def __getitem__(cls, item):
-        return cls
-
-
-class Any(metaclass=_AnyMeta):
-    pass
-
-
 def allow_storage(cls):
     return cls
 
@@ -293,7 +284,13 @@ def install():
         "u64": u64,
         "u256": u256,
         "bigint": bigint,
-        "Any": Any,
+        # Deliberately NOT exporting "Any" here: the real GenVM genlayer
+        # package does not export it from `from genlayer import *` either
+        # (confirmed by a live Studionet deploy crashing with
+        # `NameError: name 'Any' is not defined` when this stub used to
+        # paper over it). Contract files must `from typing import Any`
+        # themselves, and this stub must keep failing the same way they
+        # would in production if they don't.
         "allow_storage": allow_storage,
     }
     for name, value in names.items():

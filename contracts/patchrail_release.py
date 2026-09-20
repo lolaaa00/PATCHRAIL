@@ -31,6 +31,11 @@ import json
 import re
 from dataclasses import dataclass
 from genlayer import *
+from typing import Any  # noqa: E402 — imported after `from genlayer import *` so this
+# binding always wins: the real GenVM runtime's genlayer package does not
+# itself export `Any` (confirmed by a live Studionet deploy failing with
+# `NameError: name 'Any' is not defined` before this fix — the local pytest
+# stub incorrectly modeled genlayer as exporting its own Any and masked it).
 
 MAX_GATES = 16
 MAX_RC_REVISIONS_CAP = 20
