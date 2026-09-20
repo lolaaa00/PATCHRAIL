@@ -253,7 +253,23 @@ ContractAt = _ContractAtRegistry()
 
 
 class Contract:
-    pass
+    """Mirrors the real GenVM storage system's behavior: every class-level
+    `TreeMap[...]` / `DynArray[...]` annotation is pre-initialized before the
+    subclass's own `__init__` body runs, and user code must never assign to
+    it directly (the real runtime raises `TypeError: this class can't be
+    instantiated by user` if it does — confirmed by a live Studionet deploy
+    crash). __init__ should only ever set plain scalar fields."""
+
+    def __new__(cls, *args, **kwargs):
+        obj = object.__new__(cls)
+        for klass in reversed(cls.__mro__):
+            for name, annotation in getattr(klass, "__annotations__", {}).items():
+                origin = getattr(annotation, "__origin__", annotation)
+                if origin is TreeMap:
+                    object.__setattr__(obj, name, TreeMap())
+                elif origin is DynArray:
+                    object.__setattr__(obj, name, DynArray())
+        return obj
 
 
 class _GL(types.SimpleNamespace):

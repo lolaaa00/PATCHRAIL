@@ -209,17 +209,14 @@ class PatchrailRelease(gl.Contract):
     satisfied_rc: TreeMap[str, str]
 
     def __init__(self):
+        # Storage-typed fields (TreeMap[...]/DynArray[...] above) are
+        # auto-initialized by the GenVM storage system from their class-level
+        # annotation — manually assigning e.g. `self.projects = TreeMap()`
+        # here throws `TypeError: this class can't be instantiated by user`
+        # on the real runtime (confirmed by a live Studionet deploy crash).
+        # Only plain scalar fields are set explicitly in __init__.
         self.owner = gl.message.sender_address
         self.vault_address = ""
-        self.projects = TreeMap()
-        self.project_ids = DynArray()
-        self.gates = TreeMap()
-        self.gate_ids_by_project = TreeMap()
-        self.rcs = TreeMap()
-        self.rc_ids_by_project = TreeMap()
-        self.findings = TreeMap()
-        self.finding_ids_by_project = TreeMap()
-        self.satisfied_rc = TreeMap()
 
     def _now(self) -> u64:
         return u64(gl.vm.get_current_transaction_time())

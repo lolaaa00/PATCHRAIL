@@ -55,14 +55,10 @@ class PatchrailVault(gl.Contract):
     def __init__(self, release_address: str):
         if not release_address or len(release_address) < 4:
             raise Exception("A valid PatchrailRelease address is required")
+        # Storage-typed fields (TreeMap[...] above) are auto-initialized by
+        # the GenVM storage system from their class-level annotation — see
+        # the matching note in patchrail_release.py's __init__.
         self.release_address = release_address
-        self.funded = TreeMap()
-        self.deposited_amount = TreeMap()
-        self.released_total = TreeMap()
-        self.claimed = TreeMap()
-        self.claimed_amount = TreeMap()
-        self.refunded = TreeMap()
-        self.refunded_amount = TreeMap()
 
     def _now(self) -> u64:
         return u64(gl.vm.get_current_transaction_time())
