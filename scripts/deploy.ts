@@ -37,15 +37,19 @@ async function deployOne(client: ReturnType<typeof createClient>, path: string, 
     throw new Error(`[${label}] deployment did not finalize successfully: ${result.message}`);
   }
 
-  const address = receipt.txDataDecoded?.contractAddress;
-  const statusName = receipt.statusName;
-  const executionResultName = receipt.txExecutionResultName;
+  // The real receipt has no `txDataDecoded` field (confirmed live) — for a
+  // deploy transaction the new contract's address is `data.contract_address`,
+  // mirrored at the top-level `to_address`/`recipient`.
+  const address =
+    (receipt.data?.contract_address as string | undefined) ?? receipt.to_address ?? receipt.recipient;
+  const statusName = receipt.status_name;
+  const executionResult = receipt.consensus_data?.leader_receipt?.[0]?.execution_result;
 
   if (!address) {
     throw new Error(`[${label}] deployment did not return a contract address — receipt: ${JSON.stringify(receipt)}`);
   }
 
-  return { label, path, sha256, bytes: code.length, txHash, address, statusName, executionResultName };
+  return { label, path, sha256, bytes: code.length, txHash, address, statusName, executionResult };
 }
 
 async function main() {
@@ -76,8 +80,8 @@ async function main() {
     value: 0n,
   });
   const { receipt: wireReceipt, result: wireOutcome } = await getFinalizedReceipt(client, wireTx as `0x${string}`);
-  const wireStatus = wireReceipt.statusName;
-  const wireResult = wireReceipt.txExecutionResultName;
+  const wireStatus = wireReceipt.status_name;
+  const wireResult = wireReceipt.consensus_data?.leader_receipt?.[0]?.execution_result;
   console.log(`Wiring tx: ${wireTx} (${wireStatus} / ${wireResult})`);
   if (wireOutcome.status === "ERROR") {
     throw new Error(`set_vault_address did not finalize successfully: ${wireOutcome.message}`);
@@ -89,7 +93,7 @@ async function main() {
     signer: account.address,
     deployedAt: new Date().toISOString(),
     contracts: [release, vault],
-    wiring: { tx: wireTx, statusName: wireStatus, executionResultName: wireResult },
+    wiring: { tx: wireTx, statusName: wireStatus, executionResult: wireResult },
   };
 
   writeFileSync("docs/DEPLOYMENT_RECORD.json", JSON.stringify(record, null, 2));

@@ -150,22 +150,25 @@ needs and implements a full value-safety surface:
 
 ## Finality parsing — never default to success
 
-`lib/genlayer/txWait.ts::waitForFinality` first confirms the receipt's `statusName`
+`lib/genlayer/txWait.ts::waitForFinality` first confirms the receipt's `status_name`
 is actually `FINALIZED` (not merely returned, timed out, or canceled), then reads the
-per-validator `consensus_data.leader_receipt[].execution_result` field — the field
-actually present on real Studionet receipts — falling back to the SDK's derived
-`txExecutionResultName` only when no leader receipt is present. Its real raw values,
-confirmed against two live Studionet deploy receipts (`scripts/deploy.ts` against a
-failed deploy and, after fixing the failure, a successful one), are the strings
-`"SUCCESS"` / `"ERROR"` — **not** the SDK's declared `ExecutionResult` TypeScript enum
-names (`FINISHED_WITH_RETURN` / `FINISHED_WITH_ERROR`), which appear to apply only to
-the different, top-level `txExecutionResultName` convenience field. Both vocabularies
-are accepted as recognized. If neither source yields a recognized value, the result is
-`ERROR`, not `SUCCESS` — a missing or unrecognized execution result is never silently
-treated as a successful write.
+per-validator `consensus_data.leader_receipt[].execution_result` field. Both field
+names and values here were determined by direct live inspection — printing
+`Object.keys(receipt)` against three real Studionet transactions via
+`client.waitForTransactionReceipt` — because the SDK's own TypeScript types describe a
+shape (`statusName`, `txExecutionResultName`, `txDataDecoded`) that this method does
+not actually return in practice; the real return value is the raw snake_case GenVM
+transaction (`status_name`, `result_name`, no `txDataDecoded` at all — a deployed
+contract's address is `data.contract_address`, mirrored at `to_address`/`recipient`).
+`execution_result`'s real values are the raw strings `"SUCCESS"` / `"ERROR"`, not the
+SDK's declared `ExecutionResult` enum names (`FINISHED_WITH_RETURN` /
+`FINISHED_WITH_ERROR`); both vocabularies are accepted as recognized, and the camelCase
+`statusName` is accepted defensively alongside `status_name`. If no leader receipt or
+recognized status is present, the result is `ERROR`, not `SUCCESS` — a missing or
+unrecognized execution result is never silently treated as a successful write.
 
-This exact fail-closed behavior is what caught two real deploy-time contract bugs
-against live Studionet, instead of misreporting either as a successful deployment:
+This exact fail-closed behavior is what caught three real deploy-time bugs against
+live Studionet, instead of misreporting any of them as a successful deployment:
 
 - `from genlayer import *` does not export `Any` on the real runtime, so every
   `@gl.public.view` method annotated `-> Any` crashed contract loading with
@@ -178,15 +181,22 @@ against live Studionet, instead of misreporting either as a successful deploymen
   removing those assignments from both contracts' `__init__` methods — matching the
   pattern already proven by `ANTECEDENT`, a sibling project in this batch that had
   already deployed successfully to Studionet.
+- The frontend/deploy-script finality check itself was reading fields
+  (`receipt.statusName`, `receipt.txDataDecoded`) that the real SDK call never
+  populates, so even a genuinely successful deploy was reported as a failure. Fixed by
+  switching to the real snake_case field names, confirmed by direct inspection rather
+  than by the SDK's declared types.
 
-Both bugs passed the full local pytest suite every time, because
+All three bugs passed the full local pytest/vitest suite every time, because
 `tests/contract/genlayer_stub.py` — a hand-written stand-in for the real `genlayer`
 package, not a GenVM emulator — incorrectly modeled behavior the real runtime doesn't
-have (exporting `Any`, and silently accepting manual storage-field assignment). Both
-have since been fixed in the stub itself so it can no longer paper over the same class
-of bug; see the stub's own module docstring and inline comments for the specifics.
-This is a structural limit of any hand-written mock, not something a differently
-written test could have fully ruled out — it is the reason `docs/DEPLOYMENT.md`'s
+have (exporting `Any`, and silently accepting manual storage-field assignment), and the
+frontend unit tests exercised `waitForFinality` against a receipt shape the tests'
+author assumed rather than one taken from a live transaction. All three have since
+been fixed at the root, with tests updated to assert the actual confirmed shape. This
+is a structural limit of any hand-written mock or types-only assumption, not something
+a differently written unit test could have fully ruled out — it is the reason
+`docs/DEPLOYMENT.md`'s
 reviewer-demo path exists at all: a real deploy against the real network is the only
 thing that actually proves contract-loading correctness.
 
