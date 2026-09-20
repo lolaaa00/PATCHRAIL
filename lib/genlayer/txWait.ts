@@ -5,19 +5,20 @@ type AnyClient = ReturnType<typeof getReadClient>;
 export type WaitResult = { status: "SUCCESS" | "ERROR"; message?: string };
 
 type LeaderReceiptLike = { execution_result?: unknown };
-type ReceiptLike = {
+export type ReceiptLike = {
   statusName?: string;
   txExecutionResultName?: string;
   data?: Record<string, unknown>;
   consensus_data?: { leader_receipt?: LeaderReceiptLike[] };
+  txDataDecoded?: { contractAddress?: string };
 };
 
 const RECOGNIZED_EXECUTION_RESULTS = new Set(["FINISHED_WITH_RETURN", "FINISHED_WITH_ERROR"]);
 
 /**
- * Waits for GenVM consensus to finalize a transaction, then inspects the
- * *execution* result. A FINALIZED status is not itself success — and a
- * missing/unrecognized execution_result is never treated as success either.
+ * Fetches the finalized receipt and classifies its execution result. A
+ * FINALIZED status is not itself success — and a missing/unrecognized
+ * execution_result is never treated as success either.
  *
  * The authoritative per-validator field is `consensus_data.leader_receipt[].
  * execution_result` (present on real Studionet receipts even when the SDK's
@@ -25,8 +26,16 @@ const RECOGNIZED_EXECUTION_RESULTS = new Set(["FINISHED_WITH_RETURN", "FINISHED_
  * leader receipts first and only fall back to `txExecutionResultName` when no
  * leader receipt is present. If neither source yields a recognized value,
  * this fails closed as ERROR rather than defaulting to success.
+ *
+ * Exported (not just `waitForFinality`) so any caller that also needs the
+ * raw receipt — e.g. `scripts/deploy.ts` extracting a deployed contract
+ * address — uses the exact same fail-closed classification rather than a
+ * separately maintained, easily-drifted copy of it.
  */
-export async function waitForFinality(client: AnyClient, hash: `0x${string}`): Promise<WaitResult> {
+export async function getFinalizedReceipt(
+  client: AnyClient,
+  hash: `0x${string}`,
+): Promise<{ receipt: ReceiptLike; result: WaitResult }> {
   const receipt = (await client.waitForTransactionReceipt({
     hash: hash as never,
     status: "FINALIZED" as never,
@@ -36,7 +45,10 @@ export async function waitForFinality(client: AnyClient, hash: `0x${string}`): P
 
   const statusName = receipt.statusName;
   if (statusName !== "FINALIZED") {
-    return { status: "ERROR", message: `consensus did not reach FINALIZED: ${statusName ?? "unknown status"}` };
+    return {
+      receipt,
+      result: { status: "ERROR", message: `consensus did not reach FINALIZED: ${statusName ?? "unknown status"}` },
+    };
   }
 
   const leaderResults = (receipt.consensus_data?.leader_receipt ?? [])
@@ -52,23 +64,33 @@ export async function waitForFinality(client: AnyClient, hash: `0x${string}`): P
 
   if (resultsToCheck.length === 0) {
     return {
-      status: "ERROR",
-      message: "finalized receipt carried no execution_result — cannot confirm the write actually succeeded",
+      receipt,
+      result: {
+        status: "ERROR",
+        message: "finalized receipt carried no execution_result — cannot confirm the write actually succeeded",
+      },
     };
   }
 
   if (resultsToCheck.some((r) => r === "FINISHED_WITH_ERROR")) {
     const data = receipt.data;
     const message = data && typeof data === "object" ? JSON.stringify(data) : "execution reverted";
-    return { status: "ERROR", message };
+    return { receipt, result: { status: "ERROR", message } };
   }
 
   if (!resultsToCheck.every((r) => RECOGNIZED_EXECUTION_RESULTS.has(r))) {
     return {
-      status: "ERROR",
-      message: `finalized receipt carried an unrecognized execution_result: ${JSON.stringify(resultsToCheck)}`,
+      receipt,
+      result: {
+        status: "ERROR",
+        message: `finalized receipt carried an unrecognized execution_result: ${JSON.stringify(resultsToCheck)}`,
+      },
     };
   }
 
-  return { status: "SUCCESS" };
+  return { receipt, result: { status: "SUCCESS" } };
+}
+
+export async function waitForFinality(client: AnyClient, hash: `0x${string}`): Promise<WaitResult> {
+  return (await getFinalizedReceipt(client, hash)).result;
 }

@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { createClient, createAccount } from "genlayer-js";
 import { NETWORK, CANONICAL_CHAIN_ID, assertCanonicalNetworkOrThrow } from "../lib/genlayer/network";
+import { getFinalizedReceipt } from "../lib/genlayer/txWait";
 
 async function deployOne(client: ReturnType<typeof createClient>, path: string, label: string, args: unknown[] = []) {
   const code = readFileSync(path);
@@ -27,17 +28,18 @@ async function deployOne(client: ReturnType<typeof createClient>, path: string, 
   const txHash = await client.deployContract({ code, args: args as never[] });
   console.log(`[${label}] deploy tx: ${txHash}`);
 
-  const receipt = await client.waitForTransactionReceipt({
-    hash: txHash as never,
-    status: "FINALIZED" as never,
-    retries: 60,
-    interval: 3000,
-  });
+  // Use the same fail-closed finality classification as the frontend
+  // (lib/genlayer/txWait.ts) rather than a separately maintained check —
+  // a FINALIZED status with a missing/unrecognized execution_result must
+  // never be recorded as a successful deployment.
+  const { receipt, result } = await getFinalizedReceipt(client, txHash as `0x${string}`);
+  if (result.status === "ERROR") {
+    throw new Error(`[${label}] deployment did not finalize successfully: ${result.message}`);
+  }
 
-  const decoded = (receipt as { txDataDecoded?: { contractAddress?: string } }).txDataDecoded;
-  const address = decoded?.contractAddress;
-  const statusName = (receipt as { statusName?: string }).statusName;
-  const executionResultName = (receipt as { txExecutionResultName?: string }).txExecutionResultName;
+  const address = receipt.txDataDecoded?.contractAddress;
+  const statusName = receipt.statusName;
+  const executionResultName = receipt.txExecutionResultName;
 
   if (!address) {
     throw new Error(`[${label}] deployment did not return a contract address — receipt: ${JSON.stringify(receipt)}`);
@@ -73,17 +75,12 @@ async function main() {
     args: [vault.address],
     value: 0n,
   });
-  const wireReceipt = await client.waitForTransactionReceipt({
-    hash: wireTx as never,
-    status: "FINALIZED" as never,
-    retries: 60,
-    interval: 3000,
-  });
-  const wireStatus = (wireReceipt as { statusName?: string }).statusName;
-  const wireResult = (wireReceipt as { txExecutionResultName?: string }).txExecutionResultName;
+  const { receipt: wireReceipt, result: wireOutcome } = await getFinalizedReceipt(client, wireTx as `0x${string}`);
+  const wireStatus = wireReceipt.statusName;
+  const wireResult = wireReceipt.txExecutionResultName;
   console.log(`Wiring tx: ${wireTx} (${wireStatus} / ${wireResult})`);
-  if (wireResult === "FINISHED_WITH_ERROR") {
-    throw new Error(`set_vault_address failed: ${JSON.stringify((wireReceipt as { data?: unknown }).data)}`);
+  if (wireOutcome.status === "ERROR") {
+    throw new Error(`set_vault_address did not finalize successfully: ${wireOutcome.message}`);
   }
 
   const record = {
