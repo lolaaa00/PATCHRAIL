@@ -274,6 +274,124 @@ def test_final_gate_absorbs_rounding_dust(release, stub, make_vault):
     assert sum(v for _, v in stub.TRANSFERS) == 1000
 
 
+def test_refund_then_evaluate_and_claim_are_both_blocked(release, stub, make_vault):
+    """The exact path the review flagged: after a deadline refund pays out
+    the unearned remainder, a gate that was never satisfied beforehand must
+    be unreachable through BOTH evaluate_gate (PatchrailRelease) and
+    claim_gate (PatchrailVault) — not just one of the two."""
+    pid, vault = _setup(release, stub, make_vault, total=1000, deadline_offset=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    vault.claim_gate(pid, "quality")
+
+    stub.CURRENT_TIME["value"] += 2000
+    refunded = vault.refund_unearned(pid)
+    assert refunded == 600
+
+    with pytest.raises(Exception):
+        release.evaluate_gate(pid, "deploy")
+    with pytest.raises(Exception):
+        vault.claim_gate(pid, "deploy")
+
+
+def test_claim_conservation_guard_independent_of_release_block(release, stub, make_vault):
+    """Defense in depth: even if a gate's satisfied_rc were somehow set
+    after a refund — bypassing PatchrailRelease's own refusal to evaluate —
+    PatchrailVault's own conservation check must still refuse to pay more
+    than deposited - released - refunded. The two defenses do not rely on
+    each other to hold."""
+    pid, vault = _setup(release, stub, make_vault, total=1000, deadline_offset=1000)
+    _fund(release, stub, vault, pid, total=1000)
+    stub.CURRENT_TIME["value"] += 2000
+    refunded = vault.refund_unearned(pid)
+    assert refunded == 1000
+
+    # Force satisfied_rc directly to simulate the state PatchrailRelease's
+    # own block now prevents from ever being reached through evaluate_gate.
+    release.satisfied_rc[release._gate_key(pid, "quality")] = "forced-rc"
+    with pytest.raises(Exception):
+        vault.claim_gate(pid, "quality")
+
+
+def test_multiple_projects_isolated_in_shared_vault(release, stub, make_vault):
+    """Two independent projects funded into the SAME vault instance must
+    never contaminate each other's accounting."""
+    pid1, vault = _setup(release, stub, make_vault, total=1000)
+
+    stub.CURRENT_SENDER["value"] = CLIENT
+    pid2 = release.create_project("p2", BUILDER, "T2", REPO_URL, DEPLOY_URL, 3, 2000, stub.CURRENT_TIME["value"] + 1_000_000)
+    for gate_id, role, bps, mandatory, dep in [("quality", "repo", 4000, True, ""), ("deploy", "deploy", 6000, True, "quality")]:
+        release.add_gate(pid2, gate_id, gate_id.title(), "Criterion long enough to pass validation for " + gate_id, "OTHER", [role], bps, mandatory, dep, "MUST_MATCH_BOTH_PROJECT_HOSTS")
+    release.lock_definition(pid2)
+
+    _fund(release, stub, vault, pid1, total=1000)
+    _fund(release, stub, vault, pid2, total=2000)
+    assert vault.get_deposit(pid1) == 1000
+    assert vault.get_deposit(pid2) == 2000
+
+    amount1 = _submit_and_satisfy(release, stub, pid1, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    assert amount1 == "SATISFIED"
+    claimed1 = vault.claim_gate(pid1, "quality")
+    assert claimed1 == 400
+
+    # project 2 must be completely unaffected by project 1's claim
+    assert vault.get_released_total(pid2) == 0
+    assert vault.is_claimed(pid2, "quality") is False
+    assert vault.get_deposit(pid1) == 1000
+    assert vault.get_deposit(pid2) == 2000
+
+    stub.reset_fixtures()
+    amount2 = _submit_and_satisfy(release, stub, pid2, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    assert amount2 == "SATISFIED"
+    claimed2 = vault.claim_gate(pid2, "quality")
+    assert claimed2 == 800  # 2000 * 4000 // 10000
+
+    assert vault.get_released_total(pid1) == 400
+    assert vault.get_released_total(pid2) == 800
+    assert sorted(stub.TRANSFERS) == sorted([(BUILDER, 800)])
+
+
+def test_very_small_deposit_conservation(release, stub, make_vault):
+    """Even a deposit smaller than the gate count must be exactly conserved:
+    every non-final gate's floored share can round down to 0, and the final
+    gate must absorb the entire remainder so nothing is lost."""
+    gates = [("quality", "repo", 3334, True, ""), ("deploy", "deploy", 3333, True, ""), ("final", "release", 3333, True, "")]
+    pid, vault = _setup(release, stub, make_vault, total=2, gates=gates)
+    _fund(release, stub, vault, pid, total=2)
+
+    assert vault.get_gate_payout_amount(pid, "quality") == 0
+    assert vault.get_gate_payout_amount(pid, "deploy") == 0
+    assert vault.get_gate_payout_amount(pid, "final") == 2
+
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    _submit_and_satisfy(release, stub, pid, "deploy", DEPLOY_EVIDENCE, "Build 1 is live running commit abc1234deadbeef.", "is live running commit abc1234deadbeef")
+    _submit_and_satisfy(release, stub, pid, "final", RELEASE_EVIDENCE, "Release notes for abc1234deadbeef.", "Release notes for abc1234deadbeef")
+
+    a1 = vault.claim_gate(pid, "quality")
+    a2 = vault.claim_gate(pid, "deploy")
+    a3 = vault.claim_gate(pid, "final")
+    assert (a1, a2, a3) == (0, 0, 2)
+    assert vault.get_released_total(pid) == 2
+
+
+def test_single_unit_deposit_conservation(release, stub, make_vault):
+    """The extreme case: a deposit of 1 base unit across 3 gates. Every
+    non-final floor is 0 and the final gate claims the entire unit."""
+    gates = [("quality", "repo", 3334, True, ""), ("deploy", "deploy", 3333, True, ""), ("final", "release", 3333, True, "")]
+    pid, vault = _setup(release, stub, make_vault, total=1, gates=gates)
+    _fund(release, stub, vault, pid, total=1)
+
+    _submit_and_satisfy(release, stub, pid, "quality", REPO_EVIDENCE, "Commit abc1234deadbeef fixes lint errors.", "fixes lint errors")
+    _submit_and_satisfy(release, stub, pid, "deploy", DEPLOY_EVIDENCE, "Build 1 is live running commit abc1234deadbeef.", "is live running commit abc1234deadbeef")
+    _submit_and_satisfy(release, stub, pid, "final", RELEASE_EVIDENCE, "Release notes for abc1234deadbeef.", "Release notes for abc1234deadbeef")
+
+    a1 = vault.claim_gate(pid, "quality")
+    a2 = vault.claim_gate(pid, "deploy")
+    a3 = vault.claim_gate(pid, "final")
+    assert (a1, a2, a3) == (0, 0, 1)
+    assert vault.get_released_total(pid) == 1
+
+
 def test_vault_refuses_funds_if_bps_do_not_sum_to_10000(release, stub, make_vault):
     """Defense in depth: even though PatchrailRelease enforces bps==10000 at
     lock time, the vault independently re-verifies before ever accepting a

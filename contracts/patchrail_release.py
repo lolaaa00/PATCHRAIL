@@ -120,6 +120,34 @@ def _canonical(url: str) -> str:
     return host + "/" + path
 
 
+def _extract_origin(url: str) -> str:
+    # host:port (falling back to just host when no explicit port is given),
+    # so two different ports on the same host are correctly treated as
+    # different deployment origins rather than silently equated.
+    lower = str(url).strip().lower()
+    _extract_host(url)  # validates scheme/fragment/credentials as a side effect
+    rest = lower.split("://", 1)[1]
+    authority = rest.split("/")[0].split("?")[0]
+    return authority
+
+
+def _repo_identity(url: str) -> str:
+    # origin + the first two non-empty path segments (typically org/repo).
+    # Host alone is not sufficient to prove two URLs point at the *same*
+    # repository — github.com/org-a/repo-x and github.com/org-b/repo-y share
+    # a host but are completely unrelated. Binding on this identity instead
+    # of the bare host is what makes source_policy actually protect against
+    # unrelated-but-same-host evidence.
+    lower = str(url).strip().lower()
+    origin = _extract_origin(url)
+    rest = lower.split("://", 1)[1]
+    path = rest.split("/", 1)[1] if "/" in rest else ""
+    path = path.split("?")[0]
+    segments = [s for s in path.split("/") if s]
+    identity_path = "/".join(segments[:2])
+    return origin + "/" + identity_path
+
+
 @allow_storage
 @dataclass
 class Project:
@@ -593,18 +621,49 @@ class PatchrailRelease(gl.Contract):
         """Deterministically enforce the gate's source_policy against the RC's
         own registered evidence URLs, before any content is even fetched.
         This depends only on on-chain state (project/gate/rc), so leader and
-        validator always compute the identical result — it cannot diverge."""
+        validator always compute the identical result — it cannot diverge.
+
+        Evidence is bound to a frozen *identity*, not merely a host:
+          - "repo" / "release" / "tests" evidence must share the project's
+            registered repository's origin AND first two path segments
+            (typically org/repo) — a same-host-but-different-repository page
+            (e.g. github.com/other-org/other-repo) is rejected even though
+            its host matches, since release notes and CI artifacts are
+            conventionally hosted under the same repository path as commits.
+          - "deploy" evidence must share the project's registered
+            deployment's exact origin (host AND port), not merely its host.
+        """
         policy = gate.source_policy
         if policy == "ANY_HTTPS":
             return ""
-        repo_host = _extract_host(project.repo_url)
-        deploy_host = _extract_host(project.deploy_url)
+
+        repo_bound_roles = ("repo", "release", "tests")
+        role_url = {
+            "repo": rc.repo_evidence_url,
+            "deploy": rc.deployment_url,
+            "release": rc.release_notes_url,
+            "tests": rc.test_artifact_url,
+        }
+
         if policy in ("MUST_MATCH_PROJECT_REPO_HOST", "MUST_MATCH_BOTH_PROJECT_HOSTS"):
-            if "repo" in gate.evidence_requirements and _extract_host(rc.repo_evidence_url) != repo_host:
-                return "repo evidence host does not match the project's registered repository host"
+            project_repo_identity = _repo_identity(project.repo_url)
+            for role in repo_bound_roles:
+                if role not in gate.evidence_requirements:
+                    continue
+                url = role_url[role]
+                if not url:
+                    continue  # missing-required-evidence is handled by the normal observe flow
+                if _repo_identity(url) != project_repo_identity:
+                    return (
+                        role + " evidence is not identifiably part of the project's registered "
+                        "repository (origin + org/repo path do not match)"
+                    )
+
         if policy in ("MUST_MATCH_PROJECT_DEPLOY_HOST", "MUST_MATCH_BOTH_PROJECT_HOSTS"):
-            if "deploy" in gate.evidence_requirements and _extract_host(rc.deployment_url) != deploy_host:
-                return "deployment evidence host does not match the project's registered deployment host"
+            if "deploy" in gate.evidence_requirements and rc.deployment_url:
+                if _extract_origin(rc.deployment_url) != _extract_origin(project.deploy_url):
+                    return "deployment evidence origin does not match the project's registered deployment origin"
+
         return ""
 
     def _observe_once(self, project: Project, gate: Gate, rc: ReleaseCandidate) -> dict:
@@ -809,6 +868,20 @@ class PatchrailRelease(gl.Contract):
             raise Exception("Project is not evaluable in its current status")
         if int(project.current_rc_revision) == 0:
             raise Exception("No release candidate has been submitted yet")
+        if self.vault_address:
+            vault = gl.ContractAt(self.vault_address).contract(IPatchrailVault)
+            if vault.view().is_refunded(project_id):
+                # Once the vault has paid out the unearned remainder, no gate
+                # that was not already satisfied at that moment can ever
+                # become claimable again — its payment_bps share is gone.
+                # Evaluating it further would only produce a SATISFIED
+                # finding with nothing behind it, and (absent this check) a
+                # subsequent claim_gate call to rely on its own arithmetic
+                # guard alone to refuse payment. Blocking evaluation outright
+                # is the simpler, earlier, and more defensible line.
+                raise Exception(
+                    "Project's unearned remainder has already been refunded — no further gate evaluation is possible"
+                )
         gate_key = self._gate_key(project_id, gate_id)
         if gate_key not in self.gates:
             raise Exception("Gate does not exist")
@@ -974,3 +1047,4 @@ class PatchrailRelease(gl.Contract):
 @gl.contract_interface
 class IPatchrailVault:
     def is_funded(self, project_id: str) -> bool: ...
+    def is_refunded(self, project_id: str) -> bool: ...

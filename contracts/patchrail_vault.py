@@ -32,7 +32,18 @@ Value-safety rules enforced here:
     passed and it was not already accepted, and only the portion belonging
     to gates that were never satisfied — a gate the builder already earned
     (satisfied, whether claimed yet or not) is carved out of the refund and
-    remains claimable by the builder even after expiry.
+    remains claimable by the builder even after expiry;
+  - once a deadline refund has paid out the unearned remainder, no gate that
+    was not already satisfied at that moment can ever become claimable
+    again: PatchrailRelease.evaluate_gate refuses to evaluate any gate for a
+    project the vault reports as refunded, and claim_gate's own conservation
+    check independently accounts for released + refunded + this claim
+    against the deposit (not released + this claim alone), so the two
+    defenses do not rely on each other to hold;
+  - claim_gate's guard therefore enforces `released + refunded + new_claim
+    <= deposited` for every claim, not merely `released + new_claim <=
+    deposited` — the latter would ignore GEN that had already left the
+    contract via refund and permit a double-spend against the same deposit.
 """
 
 from dataclasses import dataclass
@@ -77,6 +88,9 @@ class PatchrailVault(gl.Contract):
             total += int(gate.payment_bps)
         return total
 
+    def _floor_share(self, total: bigint, bps: int) -> bigint:
+        return (total * bigint(int(bps))) // bigint(10000)
+
     def _gate_payout_amount(self, project, release, gate_ids: list, gate_id: str) -> bigint:
         """Deterministic per-gate payout. Floor division on every gate's own
         `total * bps // 10000` share can leave a few wei of dust permanently
@@ -86,16 +100,31 @@ class PatchrailVault(gl.Contract):
         last gate on the rail (highest order_index — by construction the
         final acceptance gate, since every gate is mandatory and this is the
         one gate that can only be satisfied once every other gate already
-        is) is paid the exact remainder rather than its own floor share."""
+        is) is paid the exact remainder rather than its own floor share.
+
+        That remainder must be computed as `total - sum(each other gate's own
+        individually-floored share)`, NOT `total - floor(sum(other bps) *
+        total // 10000)` — those two are not always equal (floor does not
+        distribute over addition), and the combined-floor version can under-
+        or over-count by exactly enough to break exact conservation on a
+        small deposit. Example: bps 5000/2500/2500 over a deposit of 7:
+        individual floors are 3/1/1 (sum 5, remainder 2); the combined
+        calculation floors 7*7500//10000 = 5 for "the other two together",
+        which also happens to be 5 here but is not guaranteed to match the
+        sum of individual floors in general — summing the individual floors
+        is the only version that is *always* exactly right."""
         gates = [release.get_gate(project.project_id, gid) for gid in gate_ids]
         final_gate = max(gates, key=lambda g: int(g.order_index))
         if str(gate_id) == str(final_gate.gate_id):
-            others_bps = sum(int(g.payment_bps) for g in gates if str(g.gate_id) != str(gate_id))
-            others_amount = (project.total_payment_amount * bigint(others_bps)) // bigint(10000)
-            return project.total_payment_amount - others_amount
+            others_sum = bigint(0)
+            for g in gates:
+                if str(g.gate_id) == str(gate_id):
+                    continue
+                others_sum += self._floor_share(project.total_payment_amount, g.payment_bps)
+            return project.total_payment_amount - others_sum
         for g in gates:
             if str(g.gate_id) == str(gate_id):
-                return (project.total_payment_amount * bigint(int(g.payment_bps))) // bigint(10000)
+                return self._floor_share(project.total_payment_amount, g.payment_bps)
         raise Exception("Gate does not exist")
 
     # ------------------------------------------------------------------
@@ -147,9 +176,19 @@ class PatchrailVault(gl.Contract):
         gate_ids = release.list_gate_ids(project_id)
         amount = self._gate_payout_amount(project, release, gate_ids, gate_id)
         current_released = self.released_total.get(project_id, bigint(0))
+        current_refunded = self.refunded_amount.get(project_id, bigint(0))
         deposited = self.deposited_amount.get(project_id, bigint(0))
-        if current_released + amount > deposited:
-            raise Exception("Claim would exceed the funded deposit — refusing to pay")
+        # Conservation must hold across ALL outflows together, not just
+        # released-so-far + this claim. Checking against deposited alone
+        # (without subtracting what has already been refunded to the client)
+        # would let a gate evaluated and satisfied *after* a deadline refund
+        # still be claimed here as long as released+this-claim stayed under
+        # the raw deposit total — even though the refunded portion is
+        # already gone. PatchrailRelease.evaluate_gate independently refuses
+        # to evaluate any gate once the vault reports is_refunded, so this is
+        # deliberate defense-in-depth, not the only line of defense.
+        if current_released + current_refunded + amount > deposited:
+            raise Exception("Claim would exceed the funded deposit once released and refunded amounts are accounted for — refusing to pay")
 
         self.claimed[key] = True
         self.claimed_amount[key] = amount

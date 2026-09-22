@@ -38,18 +38,30 @@ which is a property of the GenVM runtime's fetch implementation, not something t
 contract can enforce from Python. This is a known, documented limitation rather than
 an oversight.
 
-## Source policy — which host a gate's evidence must come from
+## Source policy — evidence is bound to an identity, not just a host
 
 Every gate declares a `source_policy` from a fixed enum (`add_gate` rejects anything
 else): `ANY_HTTPS`, `MUST_MATCH_PROJECT_REPO_HOST`, `MUST_MATCH_PROJECT_DEPLOY_HOST`,
 or `MUST_MATCH_BOTH_PROJECT_HOSTS`. `_source_policy_violation` enforces it
-deterministically, before any content is fetched: for a gate that requires `repo`
-evidence, `MUST_MATCH_PROJECT_REPO_HOST`/`_BOTH_` require the RC's
-`repo_evidence_url` host to equal the project's registered `repo_url` host; the
-`deploy` analog holds for `deployment_url` vs. `deploy_url`. A violation returns
-`NOT_SATISFIED` with a reason naming the mismatch — it never reaches the model, and
-because it depends only on on-chain state (project/gate/RC), leader and validator
-always compute the identical result.
+deterministically, before any content is fetched — and it never reaches the model on
+a violation, and because it depends only on on-chain state (project/gate/RC), leader
+and validator always compute the identical result:
+
+- **`repo` / `release` / `tests` evidence** must share the project's registered
+  repository's *identity* — origin **and** the first two path segments (`org/repo`)
+  — with `_repo_identity`, not merely its host. A same-host-but-different-repository
+  page (e.g. the registered repo is `github.com/acme/billing` but the RC cites
+  `github.com/some-other-org/unrelated-repo`) is rejected even though the host
+  matches, because release notes and CI artifacts are conventionally hosted under the
+  same repository path as commits — binding to host alone would let a builder cite
+  any public repo on the same forge as if it were theirs. See
+  `test_unrelated_same_host_repo_evidence_rejected`.
+- **`deploy` evidence** must share the project's registered deployment's exact
+  *origin* — host **and** port — with `_extract_origin`, so two different ports on the
+  same host are correctly treated as different deployment origins. See
+  `test_unrelated_same_host_deploy_evidence_rejected`.
+
+A violation returns `NOT_SATISFIED` with a reason naming the mismatch.
 
 ## Fetched content is always hostile data
 
@@ -119,15 +131,21 @@ needs and implements a full value-safety surface:
   `ACCEPTED` status requires every mandatory gate satisfied on one RC lineage, this
   makes it structurally impossible to reach `ACCEPTED` while some gate's `payment_bps`
   share is neither claimed nor claimable nor refundable.
-- **No rounding dust locked forever.** Floor division on each gate's own share can
-  leave the sum of all gates' floors below the sealed total by a few wei-equivalent
-  units. Rather than leaving that remainder unclaimable, the deterministically last
-  gate on the rail (highest `order_index` — the final-acceptance gate, since every
-  gate is mandatory) is paid the exact remainder (`total - sum of every other gate's
-  floor`) instead of its own floor share, so the full deposit is always exactly
-  claimable once every gate is satisfied and claimed (`_gate_payout_amount` in
-  `patchrail_vault.py`, shared by `claim_gate`, `get_gate_payout_amount`, and the
-  refund-estimate path so all three always agree).
+- **No rounding dust locked forever, computed correctly even for tiny deposits.**
+  Floor division on each gate's own share can leave the sum of all gates' floors
+  below the sealed total by a few wei-equivalent units. Rather than leaving that
+  remainder unclaimable, the deterministically last gate on the rail (highest
+  `order_index` — the final-acceptance gate, since every gate is mandatory) is paid
+  `total - sum(every other gate's own individually-floored share)`. This must be
+  computed as a **sum of individual floors**, not `total - floor(sum(other bps) *
+  total // 10000)` — floor does not distribute over addition, so the combined-floor
+  version can silently break exact conservation on a small deposit even though it
+  happens to agree with the correct version on a "round" one. `_floor_share`/
+  `_gate_payout_amount` in `patchrail_vault.py` is shared by `claim_gate`,
+  `get_gate_payout_amount`, and the refund-estimate path so all three always agree,
+  and `test_very_small_deposit_conservation`/`test_single_unit_deposit_conservation`
+  exercise deposits smaller than the gate count (down to 1 base unit) to prove exact
+  conservation holds even when every non-final gate's own floor rounds to 0.
 - **Exact-once claiming.** `claimed[project:gate]` is checked and set before any
   transfer is attempted; a second `claim_gate` call raises immediately.
 - **Storage updated before value moves, with rollback on failure.** `claimed[...]` and
@@ -142,11 +160,37 @@ needs and implements a full value-safety surface:
   `refund_unearned` returns only the strictly unearned remainder
   (`deposited - released - reserved_for_satisfied_unclaimed`) to the client, exactly
   once (`refunded[project_id]` guard). No admin or operator role can override this.
+- **A refund permanently closes every gate that wasn't already satisfied — enforced
+  twice, independently.** Once `refund_unearned` has paid the client, no gate that
+  wasn't already `SATISFIED` at that moment can ever become claimable, by two
+  defenses that do not depend on each other:
+  1. `PatchrailRelease.evaluate_gate` reads `PatchrailVault.is_refunded(project_id)`
+     (a `.view()` call — the read-only-both-directions cross-contract discipline
+     still holds) and refuses to evaluate any gate for a refunded project outright,
+     before consensus ever runs.
+  2. `PatchrailVault.claim_gate`'s own conservation check independently accounts for
+     `released + refunded + this_claim <= deposited` — not merely `released +
+     this_claim <= deposited` — so even a gate whose `satisfied_rc` was somehow set
+     after a refund (bypassing defense 1) still cannot be paid past what the deposit
+     actually has left. `test_claim_conservation_guard_independent_of_release_block`
+     proves this defense holds even when defense 1 is deliberately bypassed by
+     forcing `satisfied_rc` directly. `test_refund_then_evaluate_and_claim_are_both_blocked`
+     proves the ordinary path — evaluate, then claim, both after a refund — is
+     blocked by defense 1 alone, as it should be in normal operation.
 - **Conservation.** Across the funded lifetime of a project,
   `released_total + refunded_amount` can never exceed `deposited_amount` — enforced
   structurally (each payout/refund is computed from the same fixed pool and
-  decremented before transfer) and checked directly in
+  decremented before transfer), enforced explicitly in `claim_gate`'s own guard (see
+  above), and checked directly in
   `test_conservation_full_lifecycle` and `test_refund_after_expiry_returns_unearned_remainder_only`.
+- **Per-project isolation in a shared vault.** `PatchrailVault` can custody many
+  projects at once; every mapping (`funded`, `deposited_amount`, `released_total`,
+  `claimed`, `claimed_amount`, `refunded`, `refunded_amount`) is keyed by
+  `project_id` (or `project_id:gate_id`), so one project's funding, claims, or
+  refund can never read or write another's accounting.
+  `test_multiple_projects_isolated_in_shared_vault` funds two projects into the same
+  vault instance and claims against each independently to prove there is no
+  cross-contamination.
 
 ## Finality parsing — never default to success
 

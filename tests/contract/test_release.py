@@ -407,3 +407,52 @@ def test_expired_project_cannot_accept_new_rc(release, stub, make_vault):
     _as_builder(stub)
     with pytest.raises(Exception):
         release.submit_release_candidate(pid, "abc1234deadbeef", REPO_EVIDENCE, DEPLOY_EVIDENCE, RELEASE_EVIDENCE, "")
+
+
+def test_evaluate_gate_blocked_after_deadline_refund(release, stub, make_vault):
+    """Once PatchrailVault has paid out the unearned remainder, no gate that
+    wasn't already satisfied at that moment can ever be evaluated again —
+    its payment_bps share is gone, so a SATISFIED finding produced after the
+    fact would have nothing behind it."""
+    pid, vault = _funded_project(release, stub, make_vault, deadline_offset=1000)
+    _submit_rc(release, stub, pid)
+    stub.CURRENT_TIME["value"] += 2000
+    vault.refund_unearned(pid)
+    with pytest.raises(Exception):
+        release.evaluate_gate(pid, "quality")
+
+
+# ---------------------------------------------------------------------------
+# Source policy — evidence identity binding
+# ---------------------------------------------------------------------------
+
+def test_unrelated_same_host_repo_evidence_rejected(release, stub, make_vault):
+    """Repo evidence hosted on the SAME host as the registered repository
+    (github.com) but at a completely different org/repo path must still be
+    rejected. Host equality alone is not proof of repository identity —
+    binding must include the frozen repository path."""
+    pid, vault = _funded_project(release, stub, make_vault)
+    _as_builder(stub)
+    unrelated_same_host = "https://github.com/some-other-org/unrelated-repo/commit/abc1234deadbeef"
+    release.submit_release_candidate(pid, "abc1234deadbeef", unrelated_same_host, DEPLOY_EVIDENCE, RELEASE_EVIDENCE, "")
+    assert release.evaluate_gate(pid, "quality") == "NOT_SATISFIED"
+    finding = release.get_finding(pid, "quality", release.list_rc_ids(pid)[0])
+    assert "source_policy" in finding.reason
+
+
+def test_unrelated_same_host_deploy_evidence_rejected(release, stub, make_vault):
+    """Same idea for deployment evidence: a different origin (different host
+    or port) than the project's registered deploy_url must be rejected even
+    when using MUST_MATCH_BOTH_PROJECT_HOSTS."""
+    pid, vault = _funded_project(release, stub, make_vault)
+    _as_builder(stub)
+    wrong_port = "https://app.example.com:8443/build/1"
+    release.submit_release_candidate(pid, "abc1234deadbeef", REPO_EVIDENCE, wrong_port, RELEASE_EVIDENCE, "")
+    # deploy depends on quality, so quality must be satisfied first
+    stub.WEB_FIXTURES[REPO_EVIDENCE] = "Commit abc1234deadbeef fixes lint errors."
+    resp = _satisfied_response([("repo", "fixes lint errors")])
+    stub.PROMPT_QUEUE.extend([resp, resp])
+    release.evaluate_gate(pid, "quality")
+    assert release.evaluate_gate(pid, "deploy") == "NOT_SATISFIED"
+    finding = release.get_finding(pid, "deploy", release.list_rc_ids(pid)[0])
+    assert "source_policy" in finding.reason
