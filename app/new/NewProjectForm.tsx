@@ -37,12 +37,31 @@ const EMPTY_GATE: DraftGate = {
 };
 
 const EVIDENCE_OPTIONS: EvidenceRole[] = ["repo", "deploy", "release", "tests"];
-const SOURCE_POLICY_OPTIONS: SourcePolicy[] = [
+// No "ANY_HTTPS" — every option here binds evidence to a frozen project
+// identity, matching contracts/patchrail_release.py's SOURCE_POLICIES.
+const ALL_SOURCE_POLICY_OPTIONS: SourcePolicy[] = [
   "MUST_MATCH_BOTH_PROJECT_HOSTS",
   "MUST_MATCH_PROJECT_REPO_HOST",
   "MUST_MATCH_PROJECT_DEPLOY_HOST",
-  "ANY_HTTPS",
 ];
+
+const REPO_BOUND_ROLES: EvidenceRole[] = ["repo", "release", "tests"];
+
+/** Only the source_policy values that actually bind every evidence role this
+ * gate requires — matching add_gate's own on-chain rejection of a mismatched
+ * pairing, so the UI can never even offer a combination the contract would
+ * refuse. */
+function validSourcePoliciesFor(evidenceRequirements: EvidenceRole[]): SourcePolicy[] {
+  const needsRepo = evidenceRequirements.some((r) => REPO_BOUND_ROLES.includes(r));
+  const needsDeploy = evidenceRequirements.includes("deploy");
+  return ALL_SOURCE_POLICY_OPTIONS.filter((policy) => {
+    const bindsRepo = policy === "MUST_MATCH_PROJECT_REPO_HOST" || policy === "MUST_MATCH_BOTH_PROJECT_HOSTS";
+    const bindsDeploy = policy === "MUST_MATCH_PROJECT_DEPLOY_HOST" || policy === "MUST_MATCH_BOTH_PROJECT_HOSTS";
+    if (needsRepo && !bindsRepo) return false;
+    if (needsDeploy && !bindsDeploy) return false;
+    return true;
+  });
+}
 
 function toUnixSeconds(datetimeLocal: string): number {
   return Math.floor(new Date(datetimeLocal).getTime() / 1000);
@@ -68,7 +87,22 @@ export function NewProjectForm() {
   const [submitting, setSubmitting] = useState(false);
 
   function updateGate(i: number, patch: Partial<DraftGate>) {
-    setGates((gs) => gs.map((g, idx) => (idx === i ? { ...g, ...patch } : g)));
+    setGates((gs) =>
+      gs.map((g, idx) => {
+        if (idx !== i) return g;
+        const merged = { ...g, ...patch };
+        // If changing the evidence checkboxes left the current source_policy
+        // unable to bind everything this gate now requires, snap it forward
+        // to a policy that does — the user should never be able to leave a
+        // gate in an unbound state just by toggling a checkbox after picking
+        // a policy.
+        const validPolicies = validSourcePoliciesFor(merged.evidenceRequirements);
+        if (!validPolicies.includes(merged.sourcePolicy)) {
+          merged.sourcePolicy = validPolicies[0] ?? "MUST_MATCH_BOTH_PROJECT_HOSTS";
+        }
+        return merged;
+      }),
+    );
   }
 
   function addGateRow() {
@@ -306,14 +340,14 @@ export function NewProjectForm() {
             <FieldWrapper
               label="Source policy"
               htmlFor={`gate-policy-${i}`}
-              hint="Which registered project host(s) the RC's evidence URLs for this gate must match."
+              hint="Every option binds this gate's evidence to the project's frozen repository/deployment identity — there is no unbound option. Only policies that cover every evidence role checked below are offered."
             >
               <Select
                 id={`gate-policy-${i}`}
                 value={g.sourcePolicy}
                 onChange={(e) => updateGate(i, { sourcePolicy: e.target.value as SourcePolicy })}
               >
-                {SOURCE_POLICY_OPTIONS.map((p) => (
+                {validSourcePoliciesFor(g.evidenceRequirements).map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>

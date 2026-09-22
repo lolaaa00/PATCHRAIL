@@ -50,8 +50,12 @@ export const gateTypeSchema = z.enum([
 
 export const evidenceRoleSchema = z.enum(["repo", "deploy", "release", "tests"]);
 
+// No unbound "ANY_HTTPS" option — every value binds evidence to a frozen
+// project identity. The contract (contracts/patchrail_release.py) is the
+// authoritative enforcement point and rejects this independently of the
+// frontend; this schema exists so a user gets the same rejection before
+// ever submitting a transaction.
 export const sourcePolicySchema = z.enum([
-  "ANY_HTTPS",
   "MUST_MATCH_PROJECT_REPO_HOST",
   "MUST_MATCH_PROJECT_DEPLOY_HOST",
   "MUST_MATCH_BOTH_PROJECT_HOSTS",
@@ -90,7 +94,29 @@ export const addGateSchema = z
   .refine((v) => v.dependencyGateId !== v.gateId, {
     message: "a gate cannot depend on itself",
     path: ["dependencyGateId"],
-  });
+  })
+  .refine(
+    (v) => {
+      const needsRepoBinding = v.evidenceRequirements.some((r) => r === "repo" || r === "release" || r === "tests");
+      if (!needsRepoBinding) return true;
+      return v.sourcePolicy === "MUST_MATCH_PROJECT_REPO_HOST" || v.sourcePolicy === "MUST_MATCH_BOTH_PROJECT_HOSTS";
+    },
+    {
+      message: "a gate requiring repo/release/tests evidence must use a source_policy that binds it to the registered repository",
+      path: ["sourcePolicy"],
+    },
+  )
+  .refine(
+    (v) => {
+      const needsDeployBinding = v.evidenceRequirements.includes("deploy");
+      if (!needsDeployBinding) return true;
+      return v.sourcePolicy === "MUST_MATCH_PROJECT_DEPLOY_HOST" || v.sourcePolicy === "MUST_MATCH_BOTH_PROJECT_HOSTS";
+    },
+    {
+      message: "a gate requiring deploy evidence must use a source_policy that binds it to the registered deployment origin",
+      path: ["sourcePolicy"],
+    },
+  );
 export type AddGateInput = z.infer<typeof addGateSchema>;
 
 export const submitRcSchema = z.object({

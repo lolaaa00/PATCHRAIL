@@ -79,6 +79,40 @@ describe("addGateSchema", () => {
     expect(addGateSchema.safeParse({ ...base, sourcePolicy: "some free text" }).success).toBe(false);
   });
 
+  it("rejects ANY_HTTPS — there is no unbound escape hatch", () => {
+    expect(addGateSchema.safeParse({ ...base, sourcePolicy: "ANY_HTTPS" }).success).toBe(false);
+  });
+
+  it("rejects a deploy-evidence gate whose policy only binds the repo", () => {
+    expect(
+      addGateSchema.safeParse({
+        ...base,
+        evidenceRequirements: ["deploy"],
+        sourcePolicy: "MUST_MATCH_PROJECT_REPO_HOST",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a repo-evidence gate whose policy only binds deploy", () => {
+    expect(
+      addGateSchema.safeParse({
+        ...base,
+        evidenceRequirements: ["repo"],
+        sourcePolicy: "MUST_MATCH_PROJECT_DEPLOY_HOST",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts a deploy-evidence gate whose policy binds deploy", () => {
+    expect(
+      addGateSchema.safeParse({
+        ...base,
+        evidenceRequirements: ["deploy"],
+        sourcePolicy: "MUST_MATCH_PROJECT_DEPLOY_HOST",
+      }).success,
+    ).toBe(true);
+  });
+
   it("rejects a gate depending on itself", () => {
     expect(addGateSchema.safeParse({ ...base, dependencyGateId: "quality" }).success).toBe(false);
   });

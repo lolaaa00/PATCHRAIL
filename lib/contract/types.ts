@@ -17,8 +17,10 @@ export type GateType =
 
 export type EvidenceRole = "repo" | "deploy" | "release" | "tests";
 
+// No unbound "ANY_HTTPS" option: every source_policy value binds evidence to
+// a frozen project identity. See contracts/patchrail_release.py's
+// SOURCE_POLICIES for why the escape hatch was removed.
 export type SourcePolicy =
-  | "ANY_HTTPS"
   | "MUST_MATCH_PROJECT_REPO_HOST"
   | "MUST_MATCH_PROJECT_DEPLOY_HOST"
   | "MUST_MATCH_BOTH_PROJECT_HOSTS";

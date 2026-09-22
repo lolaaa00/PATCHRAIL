@@ -105,6 +105,31 @@ def test_add_gate_rejects_invalid_source_policy(release, stub):
         release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 10000, True, "", "free text is not a policy")
 
 
+def test_any_https_is_not_a_valid_source_policy(release, stub):
+    """There is no unbound escape hatch: a payment-bearing gate cannot be
+    constructed with a policy that binds nothing. ANY_HTTPS does not exist
+    in SOURCE_POLICIES at all — this is not merely discouraged by the
+    frontend, it is impossible to construct on-chain."""
+    pid = _create_basic_project(release, stub)
+    with pytest.raises(Exception):
+        release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 10000, True, "", "ANY_HTTPS")
+
+
+def test_add_gate_rejects_policy_that_leaves_a_required_role_unbound(release, stub):
+    """Evidence binding is mandatory at the contract level for every role a
+    gate actually requires — not merely possible if the right policy is
+    chosen. A gate requiring "deploy" evidence cannot be constructed under a
+    policy that only binds repo-hosted roles, and vice versa."""
+    pid = _create_basic_project(release, stub)
+    with pytest.raises(Exception):
+        release.add_gate(pid, "deploy", "Deploy", "Deployment must be live", "DEPLOYMENT", ["deploy"], 10000, True, "", "MUST_MATCH_PROJECT_REPO_HOST")
+    with pytest.raises(Exception):
+        release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 10000, True, "", "MUST_MATCH_PROJECT_DEPLOY_HOST")
+    with pytest.raises(Exception):
+        # requires both repo AND deploy evidence — only MUST_MATCH_BOTH_PROJECT_HOSTS covers both
+        release.add_gate(pid, "both", "Both", "Needs both repo and deploy evidence", "OTHER", ["repo", "deploy"], 10000, True, "", "MUST_MATCH_PROJECT_REPO_HOST")
+
+
 def test_definition_immutable_after_lock(release, stub):
     pid = _create_basic_project(release, stub)
     _add_two_gates(release, pid)
@@ -438,6 +463,56 @@ def test_unrelated_same_host_repo_evidence_rejected(release, stub, make_vault):
     assert release.evaluate_gate(pid, "quality") == "NOT_SATISFIED"
     finding = release.get_finding(pid, "quality", release.list_rc_ids(pid)[0])
     assert "source_policy" in finding.reason
+
+
+def test_nested_group_repositories_sharing_deep_path_prefix_are_distinguished(release, stub, make_vault):
+    """GitLab-style (and Azure DevOps / self-hosted Gitea) nested groups mean
+    two completely unrelated repositories can share more path segments than
+    a naive "first two segments" comparison would catch — e.g.
+    gitlab.com/group/subgroup/project-a and .../project-b share
+    "group/subgroup" as a deep prefix. Binding must still distinguish them:
+    only a path that is the registered repo's own path, continued by a
+    literal "/", counts as evidence of that repo."""
+    stub.CURRENT_SENDER["value"] = CLIENT
+    nested_repo = "https://gitlab.com/group/subgroup/project-a"
+    pid = release.create_project("nested1", BUILDER, "Nested", nested_repo, DEPLOY_URL, 3, 1000, stub.CURRENT_TIME["value"] + 1_000_000)
+    release.add_gate(pid, "quality", "Quality", "Code must pass CI with no TODOs left", "CODE_QUALITY", ["repo"], 10000, True, "", "MUST_MATCH_PROJECT_REPO_HOST")
+    release.lock_definition(pid)
+    vault = make_vault("NESTED_REL")
+    stub.ContractAt.register("NESTED_REL", release)
+    stub.ContractAt.register("NESTED_VAULT", vault)
+    stub.CURRENT_SENDER["value"] = release.owner
+    release.set_vault_address("NESTED_VAULT")
+    _as_client(stub)
+    stub.CURRENT_VALUE["value"] = 1000
+    vault.fund_project(pid)
+    release.sync_funding_status(pid)
+
+    _as_builder(stub)
+    sibling_under_same_subgroup = "https://gitlab.com/group/subgroup/project-b/-/commit/abc1234deadbeef"
+    release.submit_release_candidate(pid, "abc1234deadbeef", sibling_under_same_subgroup, DEPLOY_EVIDENCE, RELEASE_EVIDENCE, "")
+    assert release.evaluate_gate(pid, "quality") == "NOT_SATISFIED"
+    finding = release.get_finding(pid, "quality", release.list_rc_ids(pid)[0])
+    assert "source_policy" in finding.reason
+
+    # The correct sub-resource of the SAME nested-group repo must still work.
+    _as_builder(stub)
+    correct_evidence = "https://gitlab.com/group/subgroup/project-a/-/commit/def4567deadbeef"
+    release.submit_release_candidate(pid, "def4567deadbeef", correct_evidence, DEPLOY_EVIDENCE, RELEASE_EVIDENCE, "")
+    stub.WEB_FIXTURES[correct_evidence] = "Commit def4567deadbeef fixes lint errors."
+    resp = _satisfied_response([("repo", "fixes lint errors")])
+    stub.PROMPT_QUEUE.extend([resp, resp])
+    assert release.evaluate_gate(pid, "quality") == "SATISFIED"
+
+
+def test_create_project_rejects_bare_host_repo_url(release, stub):
+    """A repo_url with no path at all (e.g. just "https://github.com") would
+    make the containment check trivially match any page on that host,
+    defeating repository-identity binding entirely — rejected at
+    create_project."""
+    _as_client(stub)
+    with pytest.raises(Exception):
+        release.create_project("bare1", BUILDER, "T", "https://github.com", DEPLOY_URL, 3, 1000, stub.CURRENT_TIME["value"] + 1000)
 
 
 def test_unrelated_same_host_deploy_evidence_rejected(release, stub, make_vault):

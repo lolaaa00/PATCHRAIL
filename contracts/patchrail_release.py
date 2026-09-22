@@ -48,8 +48,16 @@ MIN_COMMIT_SHA_LEN = 7
 
 GATE_TYPES = ("CODE_QUALITY", "DOCUMENTATION", "DEPLOYMENT", "BEHAVIOR", "SECURITY_DISCLOSURE", "OTHER")
 EVIDENCE_ROLES = ("repo", "deploy", "release", "tests")
+REPO_BOUND_EVIDENCE_ROLES = ("repo", "release", "tests")
+# No "unbound" escape hatch: every source_policy option binds *something*.
+# (There used to be an "ANY_HTTPS" option that bound nothing at all — a
+# payment-bearing gate could be defined with evidence that was never checked
+# against the frozen project identity. Removed entirely; see add_gate, which
+# additionally refuses to let a gate's chosen policy leave any of its own
+# required evidence roles unbound.) The "_HOST" suffix in these names is
+# legacy — enforcement binds a full frozen path/origin identity, not a bare
+# hostname; see _is_within_repo / _extract_origin.
 SOURCE_POLICIES = (
-    "ANY_HTTPS",
     "MUST_MATCH_PROJECT_REPO_HOST",
     "MUST_MATCH_PROJECT_DEPLOY_HOST",
     "MUST_MATCH_BOTH_PROJECT_HOSTS",
@@ -131,21 +139,39 @@ def _extract_origin(url: str) -> str:
     return authority
 
 
-def _repo_identity(url: str) -> str:
-    # origin + the first two non-empty path segments (typically org/repo).
-    # Host alone is not sufficient to prove two URLs point at the *same*
-    # repository — github.com/org-a/repo-x and github.com/org-b/repo-y share
-    # a host but are completely unrelated. Binding on this identity instead
-    # of the bare host is what makes source_policy actually protect against
-    # unrelated-but-same-host evidence.
-    lower = str(url).strip().lower()
+def _repo_path(url: str) -> str:
+    # Full canonical "origin/path" with no truncation — the frozen identity
+    # of a repository is exactly the path the project registered, whatever
+    # its depth. Truncating to a fixed number of segments (e.g. "first two,
+    # for org/repo") is NOT safe in general: GitLab/Azure DevOps/self-hosted
+    # Gitea all support nested groups, so two unrelated repositories can
+    # share more than two leading path segments
+    # (gitlab.com/group/subgroup/project-a vs .../project-b) while a
+    # single-segment self-hosted layout (git.example.com/repo) has fewer
+    # than two. Comparing the full path with a "/"-boundary check
+    # (_is_within_repo, below) is the only version that is correct at any
+    # path depth.
     origin = _extract_origin(url)
+    lower = str(url).strip().lower()
     rest = lower.split("://", 1)[1]
     path = rest.split("/", 1)[1] if "/" in rest else ""
-    path = path.split("?")[0]
-    segments = [s for s in path.split("/") if s]
-    identity_path = "/".join(segments[:2])
-    return origin + "/" + identity_path
+    path = path.split("?")[0].strip("/")
+    return origin + "/" + path
+
+
+def _is_within_repo(evidence_url: str, registered_repo_url: str) -> bool:
+    # `evidence_url` is bound to `registered_repo_url`'s frozen identity iff
+    # it names that exact path or a "/"-delimited sub-resource of it (a
+    # commit, release, or CI run page under the registered repository).
+    # The explicit "/" boundary is what prevents a sibling repository whose
+    # name merely starts with the same characters — registered
+    # "github.com/acme/billing" must not match evidence at
+    # "github.com/acme/billing-fork/..." — from being treated as the same
+    # repository merely because one path string is a character-level prefix
+    # of the other.
+    registered = _repo_path(registered_repo_url)
+    candidate = _repo_path(evidence_url)
+    return candidate == registered or candidate.startswith(registered + "/")
 
 
 @allow_storage
@@ -300,6 +326,12 @@ class PatchrailRelease(gl.Contract):
             raise Exception("Invalid title")
         _validate_url(repo_url)
         _validate_url(deploy_url)
+        if not _repo_path(repo_url).split("/", 1)[-1]:
+            # A bare host (e.g. "https://github.com" with no org/repo path)
+            # would make _is_within_repo's containment check trivially match
+            # *any* page on that host, defeating repository-identity binding
+            # entirely. The registered repository must name an actual path.
+            raise Exception("repo_url must include a repository path, not just a bare host")
         if int(max_rc_revisions) < 1 or int(max_rc_revisions) > MAX_RC_REVISIONS_CAP:
             raise Exception("max_rc_revisions out of bounds")
         if total_payment_amount <= bigint(0):
@@ -387,6 +419,27 @@ class PatchrailRelease(gl.Contract):
         for role in evidence_requirements:
             if role not in EVIDENCE_ROLES:
                 raise Exception("Invalid evidence requirement: " + str(role))
+        # Evidence binding is mandatory at the contract level for every
+        # evidence role this specific gate actually requires — not merely
+        # possible if the caller happens to pick a strict-enough policy.
+        # A gate cannot be constructed at all with a role its chosen policy
+        # leaves unbound (there is no source_policy value that leaves
+        # anything unbound in the first place — see SOURCE_POLICIES — but
+        # this additionally rejects a mismatched pairing, e.g. a gate
+        # requiring "deploy" evidence under a policy that only binds
+        # repo-hosted roles).
+        needs_repo_binding = any(role in REPO_BOUND_EVIDENCE_ROLES for role in evidence_requirements)
+        needs_deploy_binding = "deploy" in evidence_requirements
+        if needs_repo_binding and source_policy not in ("MUST_MATCH_PROJECT_REPO_HOST", "MUST_MATCH_BOTH_PROJECT_HOSTS"):
+            raise Exception(
+                "This gate requires repo/release/tests evidence, which must be bound to the "
+                "registered repository — use MUST_MATCH_PROJECT_REPO_HOST or MUST_MATCH_BOTH_PROJECT_HOSTS"
+            )
+        if needs_deploy_binding and source_policy not in ("MUST_MATCH_PROJECT_DEPLOY_HOST", "MUST_MATCH_BOTH_PROJECT_HOSTS"):
+            raise Exception(
+                "This gate requires deploy evidence, which must be bound to the registered "
+                "deployment origin — use MUST_MATCH_PROJECT_DEPLOY_HOST or MUST_MATCH_BOTH_PROJECT_HOSTS"
+            )
         if dependency_gate_id:
             if dependency_gate_id == gate_id:
                 raise Exception("A gate cannot depend on itself")
@@ -623,21 +676,28 @@ class PatchrailRelease(gl.Contract):
         This depends only on on-chain state (project/gate/rc), so leader and
         validator always compute the identical result — it cannot diverge.
 
-        Evidence is bound to a frozen *identity*, not merely a host:
-          - "repo" / "release" / "tests" evidence must share the project's
-            registered repository's origin AND first two path segments
-            (typically org/repo) — a same-host-but-different-repository page
-            (e.g. github.com/other-org/other-repo) is rejected even though
-            its host matches, since release notes and CI artifacts are
-            conventionally hosted under the same repository path as commits.
+        Evidence is bound to a frozen *identity*, not merely a host, and this
+        binding is unconditional for whichever roles the gate actually
+        requires — add_gate refuses to construct a gate whose source_policy
+        would leave any of its own required roles unbound, so there is no
+        policy value under which this function can be a no-op for a role
+        the gate declares it needs:
+          - "repo" / "release" / "tests" evidence must be the project's
+            registered repository's own path or a "/"-delimited sub-resource
+            of it (`_is_within_repo`) — not merely share its origin, and not
+            merely share a fixed number of leading path segments. This
+            correctly distinguishes github.com/acme/billing from
+            github.com/acme/billing-fork (a same-length-prefix sibling) AND
+            from gitlab.com/group/subgroup/other-project (a repository that
+            shares a *deeper* path prefix than a simple two-segment
+            comparison would catch), because a real sub-resource of the
+            registered repo must continue with a literal "/" immediately
+            after the registered path, never mid-segment.
           - "deploy" evidence must share the project's registered
             deployment's exact origin (host AND port), not merely its host.
         """
         policy = gate.source_policy
-        if policy == "ANY_HTTPS":
-            return ""
 
-        repo_bound_roles = ("repo", "release", "tests")
         role_url = {
             "repo": rc.repo_evidence_url,
             "deploy": rc.deployment_url,
@@ -646,17 +706,16 @@ class PatchrailRelease(gl.Contract):
         }
 
         if policy in ("MUST_MATCH_PROJECT_REPO_HOST", "MUST_MATCH_BOTH_PROJECT_HOSTS"):
-            project_repo_identity = _repo_identity(project.repo_url)
-            for role in repo_bound_roles:
+            for role in REPO_BOUND_EVIDENCE_ROLES:
                 if role not in gate.evidence_requirements:
                     continue
                 url = role_url[role]
                 if not url:
                     continue  # missing-required-evidence is handled by the normal observe flow
-                if _repo_identity(url) != project_repo_identity:
+                if not _is_within_repo(url, project.repo_url):
                     return (
                         role + " evidence is not identifiably part of the project's registered "
-                        "repository (origin + org/repo path do not match)"
+                        "repository (not the registered path or a sub-resource of it)"
                     )
 
         if policy in ("MUST_MATCH_PROJECT_DEPLOY_HOST", "MUST_MATCH_BOTH_PROJECT_HOSTS"):

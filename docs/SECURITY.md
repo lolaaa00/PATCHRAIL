@@ -38,24 +38,57 @@ which is a property of the GenVM runtime's fetch implementation, not something t
 contract can enforce from Python. This is a known, documented limitation rather than
 an oversight.
 
-## Source policy — evidence is bound to an identity, not just a host
+## Source policy — evidence binding is mandatory, with no unbound escape hatch
 
 Every gate declares a `source_policy` from a fixed enum (`add_gate` rejects anything
-else): `ANY_HTTPS`, `MUST_MATCH_PROJECT_REPO_HOST`, `MUST_MATCH_PROJECT_DEPLOY_HOST`,
-or `MUST_MATCH_BOTH_PROJECT_HOSTS`. `_source_policy_violation` enforces it
-deterministically, before any content is fetched — and it never reaches the model on
-a violation, and because it depends only on on-chain state (project/gate/RC), leader
-and validator always compute the identical result:
+else): `MUST_MATCH_PROJECT_REPO_HOST`, `MUST_MATCH_PROJECT_DEPLOY_HOST`, or
+`MUST_MATCH_BOTH_PROJECT_HOSTS`. **There is no unbound option.** An earlier revision
+had a fourth value, `ANY_HTTPS`, that bound nothing at all — a payment-bearing gate
+could be defined whose evidence was never checked against the project's frozen
+identity. It has been removed from `SOURCE_POLICIES` entirely (not merely discouraged
+in the frontend): `add_gate` raises immediately if `source_policy` is anything other
+than the three binding values, so `ANY_HTTPS` cannot be constructed on-chain no matter
+what a client sends. See `test_any_https_is_not_a_valid_source_policy`.
 
-- **`repo` / `release` / `tests` evidence** must share the project's registered
-  repository's *identity* — origin **and** the first two path segments (`org/repo`)
-  — with `_repo_identity`, not merely its host. A same-host-but-different-repository
-  page (e.g. the registered repo is `github.com/acme/billing` but the RC cites
-  `github.com/some-other-org/unrelated-repo`) is rejected even though the host
-  matches, because release notes and CI artifacts are conventionally hosted under the
-  same repository path as commits — binding to host alone would let a builder cite
-  any public repo on the same forge as if it were theirs. See
-  `test_unrelated_same_host_repo_evidence_rejected`.
+`add_gate` additionally refuses to construct a gate whose chosen policy would leave
+any of *that gate's own* required evidence roles unbound — a gate requiring `deploy`
+evidence cannot be created under `MUST_MATCH_PROJECT_REPO_HOST` (and the repo-bound-role
+analog holds in reverse), so binding is mandatory for every role a gate actually
+needs, not merely possible if the right policy happens to be chosen. See
+`test_add_gate_rejects_policy_that_leaves_a_required_role_unbound`. The same coverage
+check is mirrored in `lib/validation/schemas.ts`'s `addGateSchema` and the `/new` form
+only ever offers `source_policy` options that cover the evidence roles currently
+checked for that gate (`validSourcePoliciesFor` in `NewProjectForm.tsx`) — but the
+contract is the actual enforcement boundary; the frontend narrowing is a courtesy.
+
+`_source_policy_violation` enforces the chosen policy deterministically, before any
+content is fetched — it never reaches the model on a violation, and because it
+depends only on on-chain state (project/gate/RC), leader and validator always compute
+the identical result:
+
+- **`repo` / `release` / `tests` evidence** must be the project's registered
+  repository's own frozen path, or a `/`-delimited sub-resource of it
+  (`_is_within_repo`) — not merely share its origin, and not merely share a fixed
+  number of leading path segments. Two failure modes this specifically closes:
+  - **Same host, unrelated repository.** The registered repo is
+    `github.com/acme/billing` but the RC cites `github.com/some-other-org/unrelated-repo`
+    — rejected even though the host matches, because host equality alone was never
+    proof of repository identity. See `test_unrelated_same_host_repo_evidence_rejected`.
+  - **Same *deep* path prefix, unrelated repository.** GitLab/Azure DevOps/self-hosted
+    Gitea all support nested groups, so two completely unrelated repositories can
+    share more than two leading path segments — e.g.
+    `gitlab.com/group/subgroup/project-a` and `gitlab.com/group/subgroup/project-b`
+    share `group/subgroup`. Truncating to a fixed segment count (the earlier "first
+    two segments, i.e. org/repo" version of this check) would have wrongly treated
+    these as the same repository. `_is_within_repo` compares the **full** registered
+    path with an explicit `/`-boundary requirement instead, which also correctly
+    rejects a same-length-prefix sibling like `github.com/acme/billing-fork` against
+    a registered `github.com/acme/billing` — a character-level prefix without a `/`
+    boundary is not a sub-resource. See
+    `test_nested_group_repositories_sharing_deep_path_prefix_are_distinguished`.
+  - A `repo_url` with no path at all (a bare host) is rejected at `create_project`
+    time — it would otherwise make the containment check trivially match every page
+    on that host. See `test_create_project_rejects_bare_host_repo_url`.
 - **`deploy` evidence** must share the project's registered deployment's exact
   *origin* — host **and** port — with `_extract_origin`, so two different ports on the
   same host are correctly treated as different deployment origins. See

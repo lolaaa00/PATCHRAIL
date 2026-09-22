@@ -6,7 +6,7 @@
 
 | Method | Caller | Notes |
 | --- | --- | --- |
-| `create_project(project_id, builder, title, repo_url, deploy_url, max_rc_revisions, total_payment_amount, deadline)` | anyone (becomes client) | status → `DRAFT` |
+| `create_project(project_id, builder, title, repo_url, deploy_url, max_rc_revisions, total_payment_amount, deadline)` | anyone (becomes client) | status → `DRAFT`; `repo_url` must include a non-empty path, not just a bare host — see "Source policy" below |
 | `add_gate(project_id, gate_id, label, criterion, gate_type, evidence_requirements, payment_bps, mandatory, dependency_gate_id, source_policy)` | project client | only while `DRAFT` and unlocked; `mandatory` must be `True` (every gate is mandatory — see below) and `source_policy` must be one of `SOURCE_POLICIES` |
 | `lock_definition(project_id)` | project client | requires `payment_bps` sum to exactly 10000 and ≥1 mandatory gate; computes and stores `definition_hash` over every material field; freezes gates |
 | `cancel_project(project_id)` | project client | only while `DRAFT` |
@@ -44,16 +44,26 @@ unclaimable and unrefundable once the project reaches `ACCEPTED`, since acceptan
 only requires mandatory gates and refund is unavailable once `ACCEPTED`. Making every
 gate mandatory closes that gap by construction rather than by policy.
 
-### Source policy
+### Source policy — no unbound option, mandatory per-gate coverage
 
-Each gate's `source_policy` is one of `ANY_HTTPS`, `MUST_MATCH_PROJECT_REPO_HOST`,
-`MUST_MATCH_PROJECT_DEPLOY_HOST`, `MUST_MATCH_BOTH_PROJECT_HOSTS`. Enforced
-deterministically in `_source_policy_violation`, before any content is fetched:
-`repo`/`release`/`tests` evidence must share the project's registered repository's
-*identity* (`_repo_identity` — origin **and** first two path segments, e.g.
-`github.com/org/repo`), not merely its host; `deploy` evidence must share the
-project's registered deployment's exact *origin* (`_extract_origin` — host **and**
-port). A violation returns `NOT_SATISFIED` immediately — see `docs/SECURITY.md`.
+Each gate's `source_policy` is one of `MUST_MATCH_PROJECT_REPO_HOST`,
+`MUST_MATCH_PROJECT_DEPLOY_HOST`, `MUST_MATCH_BOTH_PROJECT_HOSTS` — there is no
+unbound value (a former `ANY_HTTPS` option was removed from `SOURCE_POLICIES`
+entirely). `add_gate` also rejects a policy that would leave any evidence role the
+gate itself requires unbound (e.g. a `deploy`-evidence gate under
+`MUST_MATCH_PROJECT_REPO_HOST`), so it is not possible to construct a gate with any
+unbound evidence role regardless of what a client sends.
+
+Enforced deterministically in `_source_policy_violation`, before any content is
+fetched: `repo`/`release`/`tests` evidence must be the project's registered
+repository's own frozen path or a `/`-delimited sub-resource of it (`_is_within_repo`
+— a full-path containment check with an explicit segment boundary, not a fixed
+leading-segment-count comparison, so it correctly distinguishes both same-host
+unrelated repos and nested-group repos sharing a deeper path prefix); `deploy`
+evidence must share the project's registered deployment's exact *origin*
+(`_extract_origin` — host **and** port). `repo_url` itself must include a non-empty
+path at `create_project` time (a bare host would make the containment check match
+anything). A violation returns `NOT_SATISFIED` immediately — see `docs/SECURITY.md`.
 
 ### Definition hash
 
