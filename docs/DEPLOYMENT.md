@@ -32,11 +32,11 @@ execution status.
 
 | Contract | Address | Deploy tx | Explorer |
 | --- | --- | --- | --- |
-| `PatchrailRelease` | `0x5648992E4f1Dd37cb54662d4d11459D58F036df1` | `0x9f0c133d720c437196d951cb4178c76b4980445ccbb3c6f21de2d4c30150ebd8` | [tx](https://explorer-studio.genlayer.com/tx/0x9f0c133d720c437196d951cb4178c76b4980445ccbb3c6f21de2d4c30150ebd8) · [address](https://explorer-studio.genlayer.com/address/0x5648992E4f1Dd37cb54662d4d11459D58F036df1) |
-| `PatchrailVault` | `0xc6A813315e5Cdc9f90132d4f9233374041621A43` | `0xed49d4510dd4cdfae3bf3387ad00ba34ed234ec4df417b42f5c8a551203e1c9e` | [tx](https://explorer-studio.genlayer.com/tx/0xed49d4510dd4cdfae3bf3387ad00ba34ed234ec4df417b42f5c8a551203e1c9e) · [address](https://explorer-studio.genlayer.com/address/0xc6A813315e5Cdc9f90132d4f9233374041621A43) |
+| `PatchrailRelease` | `0xD9BF37fD5a6695565c952660D9d9366A487CFeaC` | `0xf7326cd500f945076509ce80b204d77c867c439b13046889561d12746b254ff0` | [tx](https://explorer-studio.genlayer.com/tx/0xf7326cd500f945076509ce80b204d77c867c439b13046889561d12746b254ff0) · [address](https://explorer-studio.genlayer.com/address/0xD9BF37fD5a6695565c952660D9d9366A487CFeaC) |
+| `PatchrailVault` | `0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F` | `0xe89e2a1f3a9de52f55f3e6419b4dc9404f6d9f4e04d5adcba360d2dd7ae3154d` | [tx](https://explorer-studio.genlayer.com/tx/0xe89e2a1f3a9de52f55f3e6419b4dc9404f6d9f4e04d5adcba360d2dd7ae3154d) · [address](https://explorer-studio.genlayer.com/address/0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F) |
 
 Wiring (`PatchrailRelease.set_vault_address(vault)`): tx
-[`0xf70e201626ca1f4b52e21993df93933b12a35428e474403c08e4baaed851452e`](https://explorer-studio.genlayer.com/tx/0xf70e201626ca1f4b52e21993df93933b12a35428e474403c08e4baaed851452e)
+[`0xd9e35664d6fd796ade6eca23f71d09d85da6e842cda4ae3673cb81e042df2dcf`](https://explorer-studio.genlayer.com/tx/0xd9e35664d6fd796ade6eca23f71d09d85da6e842cda4ae3673cb81e042df2dcf)
 — `FINALIZED` / `SUCCESS`.
 
 Public signer: `0x778D1663f9D5b338aBaD5C62899830AD3520a32F` (a disposable Studionet
@@ -48,10 +48,19 @@ redeploy, directly against the live contracts:
 
 ```text
 Release.list_project_ids()                 -> []
-Release.get_vault_address()                -> 0xc6A813315e5Cdc9f90132d4f9233374041621A43
+Release.get_vault_address()                -> 0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F
    (matches the deployed PatchrailVault address)
 Vault.is_funded("nonexistent")              -> false
 ```
+
+This is the **second** deployment: the first (`PatchrailRelease` at
+`0x5648992E4f1Dd37cb54662d4d11459D58F036df1`, `PatchrailVault` at
+`0xc6A813315e5Cdc9f90132d4f9233374041621A43`) predates the value-safety fixes from a
+team review (deadline-refund finality, conservation accounting for refunds, evidence
+identity binding, exact dust-remainder math — see `docs/SECURITY.md`) and is
+superseded. Contracts are immutable once deployed, so applying those fixes required a
+fresh deployment rather than an upgrade; the first pair of addresses should be treated
+as decommissioned and is kept here only for the audit trail.
 
 `NEXT_PUBLIC_RELEASE_ADDRESS` / `NEXT_PUBLIC_VAULT_ADDRESS` are set to the addresses
 above both in `.env.local` (git-ignored, local dev) and as Production environment
@@ -99,8 +108,8 @@ Anyone who wants to redeploy from a clean checkout:
 ## After a deployment
 
 ```bash
-NEXT_PUBLIC_RELEASE_ADDRESS=0x5648992E4f1Dd37cb54662d4d11459D58F036df1
-NEXT_PUBLIC_VAULT_ADDRESS=0xc6A813315e5Cdc9f90132d4f9233374041621A43
+NEXT_PUBLIC_RELEASE_ADDRESS=0xD9BF37fD5a6695565c952660D9d9366A487CFeaC
+NEXT_PUBLIC_VAULT_ADDRESS=0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F
 ```
 
 Until both are set, every page in this app correctly reports `NOT_DEPLOYED` via
