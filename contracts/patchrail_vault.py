@@ -63,13 +63,21 @@ class PatchrailVault(gl.Contract):
     refunded: TreeMap[str, bool]
     refunded_amount: TreeMap[str, bigint]
 
-    def __init__(self, release_address: str):
-        if not release_address or len(release_address) < 4:
+    def __init__(self, release_address: Address):
+        # `release_address` is deliberately an Address at the ABI boundary.
+        # genlayer-js correctly recognizes a 0x-prefixed constructor argument
+        # as the native GenVM address type; declaring this parameter as `str`
+        # made a real deployment revert during constructor decoding even though
+        # the rendered calldata looked like a string. Store its canonical text
+        # form because ContractAt accepts that form and the rest of this
+        # contract's storage/interface is string-based.
+        release_address_text = str(release_address)
+        if not release_address_text or len(release_address_text) < 4:
             raise Exception("A valid PatchrailRelease address is required")
         # Storage-typed fields (TreeMap[...] above) are auto-initialized by
         # the GenVM storage system from their class-level annotation — see
         # the matching note in patchrail_release.py's __init__.
-        self.release_address = release_address
+        self.release_address = release_address_text
 
     def _now(self) -> u64:
         return u64(gl.vm.get_current_transaction_time())
