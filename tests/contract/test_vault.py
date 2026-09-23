@@ -241,6 +241,14 @@ def test_vault_rejects_construction_without_release_address(make_vault):
         make_vault("")
 
 
+def test_vault_accepts_native_address_constructor_argument(make_vault, stub):
+    """The deployed constructor receives a GenVM Address, not a string.
+    This mirrors genlayer-js's encoding of a 0x-prefixed constructor arg and
+    prevents a deployment-time ABI decode failure."""
+    vault = make_vault(stub.Address(REL_ADDR))
+    assert vault.release_address == REL_ADDR
+
+
 def test_wrong_gate_id_raises(release, stub, make_vault):
     pid, vault = _setup(release, stub, make_vault, total=1000)
     _fund(release, stub, vault, pid, total=1000)
