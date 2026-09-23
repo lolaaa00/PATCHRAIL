@@ -29,6 +29,7 @@ between two Intelligent Contracts.
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass
 from genlayer import *
 from typing import Any  # noqa: E402 — imported after `from genlayer import *` so this
@@ -273,7 +274,14 @@ class PatchrailRelease(gl.Contract):
         self.vault_address = ""
 
     def _now(self) -> u64:
-        return u64(gl.vm.get_current_transaction_time())
+        # Older local test stubs expose the VM helper; current Studionet
+        # exposes deterministic transaction time through Python's clock.
+        # GenVM pins time.time() to the transaction timestamp for every
+        # validator, so this remains consensus-safe.
+        try:
+            return u64(gl.vm.get_current_transaction_time())
+        except AttributeError:
+            return u64(int(time.time()))
 
     def _gate_key(self, project_id: str, gate_id: str) -> str:
         return project_id + ":" + gate_id
