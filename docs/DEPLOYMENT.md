@@ -32,40 +32,24 @@ execution status.
 
 | Contract | Address | Deploy tx | Explorer |
 | --- | --- | --- | --- |
-| `PatchrailRelease` | `0xD9BF37fD5a6695565c952660D9d9366A487CFeaC` | `0xf7326cd500f945076509ce80b204d77c867c439b13046889561d12746b254ff0` | [tx](https://explorer-studio.genlayer.com/tx/0xf7326cd500f945076509ce80b204d77c867c439b13046889561d12746b254ff0) · [address](https://explorer-studio.genlayer.com/address/0xD9BF37fD5a6695565c952660D9d9366A487CFeaC) |
-| `PatchrailVault` | `0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F` | `0xe89e2a1f3a9de52f55f3e6419b4dc9404f6d9f4e04d5adcba360d2dd7ae3154d` | [tx](https://explorer-studio.genlayer.com/tx/0xe89e2a1f3a9de52f55f3e6419b4dc9404f6d9f4e04d5adcba360d2dd7ae3154d) · [address](https://explorer-studio.genlayer.com/address/0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F) |
+| `PatchrailRelease` | `0x5EA4b20367251221061900eA919d40276FDB49F4` | `0xf57d737e32f795f81ca08c2359ba5e8a65112d10d75c009a30d981616eda6c5e` | [tx](https://explorer-studio.genlayer.com/tx/0xf57d737e32f795f81ca08c2359ba5e8a65112d10d75c009a30d981616eda6c5e) · [address](https://explorer-studio.genlayer.com/address/0x5EA4b20367251221061900eA919d40276FDB49F4) |
+| `PatchrailVault` | `0x0581b6bca963F196Ce63e2C4E2A95441583fa73D` | `0xd7fbe2b316b30eabe741cc24f38b85d2dd8074a5ac274aa2a12fbc049a3bf28e` | [tx](https://explorer-studio.genlayer.com/tx/0xd7fbe2b316b30eabe741cc24f38b85d2dd8074a5ac274aa2a12fbc049a3bf28e) · [address](https://explorer-studio.genlayer.com/address/0x0581b6bca963F196Ce63e2C4E2A95441583fa73D) |
 
 Wiring (`PatchrailRelease.set_vault_address(vault)`): tx
-[`0xd9e35664d6fd796ade6eca23f71d09d85da6e842cda4ae3673cb81e042df2dcf`](https://explorer-studio.genlayer.com/tx/0xd9e35664d6fd796ade6eca23f71d09d85da6e842cda4ae3673cb81e042df2dcf)
+[`0x599313db4e78dae78c33d842c4729d91ebcefcf16d753d734ae14965b20e74ff`](https://explorer-studio.genlayer.com/tx/0x599313db4e78dae78c33d842c4729d91ebcefcf16d753d734ae14965b20e74ff)
 — `FINALIZED` / `SUCCESS`.
 
-Public signer: `0x778D1663f9D5b338aBaD5C62899830AD3520a32F` (a disposable Studionet
-test key funded with test GEN only — not a production signer, holds no meaningful
-value, and is not reused for anything else).
-
-Independent readback taken immediately after deployment, before any frontend
-redeploy, directly against the live contracts:
-
-```text
-Release.list_project_ids()                 -> []
-Release.get_vault_address()                -> 0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F
-   (matches the deployed PatchrailVault address)
-Vault.is_funded("nonexistent")              -> false
-```
-
-This is the **second** deployment: the first (`PatchrailRelease` at
-`0x5648992E4f1Dd37cb54662d4d11459D58F036df1`, `PatchrailVault` at
-`0xc6A813315e5Cdc9f90132d4f9233374041621A43`) predates the value-safety fixes from a
-team review (deadline-refund finality, conservation accounting for refunds, evidence
-identity binding, exact dust-remainder math — see `docs/SECURITY.md`) and is
-superseded. Contracts are immutable once deployed, so applying those fixes required a
-fresh deployment rather than an upgrade; the first pair of addresses should be treated
-as decommissioned and is kept here only for the audit trail.
+This is the **current deployment**, built from commit
+`649791e3b0197ec18bbda63813c17072dddb431d` after the mandatory evidence-binding
+and Vault-constructor ABI fixes. Both deployment receipts and the wiring receipt are
+recorded as `FINALIZED` / `SUCCESS` in `DEPLOYMENT_RECORD.json`. The prior pairs at
+`0xD9BF37fD5a6695565c952660D9d9366A487CFeaC` / `0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F`
+and `0x5648992E4f1Dd37cb54662d4d11459D58F036df1` /
+`0xc6A813315e5Cdc9f90132d4f9233374041621A43` are superseded and must not be used.
 
 `NEXT_PUBLIC_RELEASE_ADDRESS` / `NEXT_PUBLIC_VAULT_ADDRESS` are set to the addresses
 above both in `.env.local` (git-ignored, local dev) and as Production environment
-variables on the Vercel project serving this app, which has been redeployed against
-them.
+variables on the Vercel project serving this app, then redeploy the frontend.
 
 ### What it took to get here — three real bugs, each found only by a live deploy
 
@@ -108,8 +92,8 @@ Anyone who wants to redeploy from a clean checkout:
 ## After a deployment
 
 ```bash
-NEXT_PUBLIC_RELEASE_ADDRESS=0xD9BF37fD5a6695565c952660D9d9366A487CFeaC
-NEXT_PUBLIC_VAULT_ADDRESS=0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F
+NEXT_PUBLIC_RELEASE_ADDRESS=0x5EA4b20367251221061900eA919d40276FDB49F4
+NEXT_PUBLIC_VAULT_ADDRESS=0x0581b6bca963F196Ce63e2C4E2A95441583fa73D
 ```
 
 Until both are set, every page in this app correctly reports `NOT_DEPLOYED` via
