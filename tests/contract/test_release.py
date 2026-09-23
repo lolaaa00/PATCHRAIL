@@ -56,6 +56,22 @@ def test_create_project_requires_distinct_client_and_builder(release, stub):
         release.create_project("p1", CLIENT, "T", REPO_URL, DEPLOY_URL, 3, 1000, stub.CURRENT_TIME["value"] + 1000)
 
 
+def test_create_project_accepts_native_builder_address(release, stub):
+    """The frontend ABI encodes wallet-shaped builder args as Address values."""
+    _as_client(stub)
+    pid = release.create_project(
+        "native-builder",
+        stub.Address(BUILDER),
+        "T",
+        REPO_URL,
+        DEPLOY_URL,
+        3,
+        1000,
+        stub.CURRENT_TIME["value"] + 1000,
+    )
+    assert release.projects[pid].builder == BUILDER
+
+
 def test_create_project_rejects_past_deadline(release, stub):
     _as_client(stub)
     with pytest.raises(Exception):
