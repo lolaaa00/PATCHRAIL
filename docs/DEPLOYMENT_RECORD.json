@@ -3,33 +3,33 @@
     "chainId": 61999,
     "rpc": "https://studio.genlayer.com/api"
   },
-  "gitSha": "ccbff110be354ef9243e055197f8fd609ad3e062",
+  "gitSha": "649791e3b0197ec18bbda63813c17072dddb431d",
   "signer": "0x778D1663f9D5b338aBaD5C62899830AD3520a32F",
-  "deployedAt": "2026-09-22T11:17:53.181Z",
+  "deployedAt": "2026-09-23T18:48:08.029Z",
   "contracts": [
     {
       "label": "PatchrailRelease",
       "path": "contracts/patchrail_release.py",
-      "sha256": "f64fa0dfebe422206ea598e2a3e94f183f6874aba61c926a9b6ba18b3b005e66",
-      "bytes": 44244,
-      "txHash": "0xf7326cd500f945076509ce80b204d77c867c439b13046889561d12746b254ff0",
-      "address": "0xD9BF37fD5a6695565c952660D9d9366A487CFeaC",
+      "sha256": "d68ae725da95d66318a86ebbd03b54a5261620e2d1779f9b74b0a7593cdf8294",
+      "bytes": 48405,
+      "txHash": "0xf57d737e32f795f81ca08c2359ba5e8a65112d10d75c009a30d981616eda6c5e",
+      "address": "0x5EA4b20367251221061900eA919d40276FDB49F4",
       "statusName": "FINALIZED",
       "executionResult": "SUCCESS"
     },
     {
       "label": "PatchrailVault",
       "path": "contracts/patchrail_vault.py",
-      "sha256": "85a4d1c1fde1f9df6466a3bc58ab84817ce576b892f088bb0b191684bb805aa9",
-      "bytes": 15415,
-      "txHash": "0xe89e2a1f3a9de52f55f3e6419b4dc9404f6d9f4e04d5adcba360d2dd7ae3154d",
-      "address": "0x0Be56dBC6ec329c9f7aA31956A6e592fE015Eb6F",
+      "sha256": "5c498c25d1ef90214df15841b4069a11dc574d5857eb83d3605e5ab11cca8ba9",
+      "bytes": 16006,
+      "txHash": "0xd7fbe2b316b30eabe741cc24f38b85d2dd8074a5ac274aa2a12fbc049a3bf28e",
+      "address": "0x0581b6bca963F196Ce63e2C4E2A95441583fa73D",
       "statusName": "FINALIZED",
       "executionResult": "SUCCESS"
     }
   ],
   "wiring": {
-    "tx": "0xd9e35664d6fd796ade6eca23f71d09d85da6e842cda4ae3673cb81e042df2dcf",
+    "tx": "0x599313db4e78dae78c33d842c4729d91ebcefcf16d753d734ae14965b20e74ff",
     "statusName": "FINALIZED",
     "executionResult": "SUCCESS"
   }
