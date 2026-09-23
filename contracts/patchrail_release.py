@@ -310,7 +310,7 @@ class PatchrailRelease(gl.Contract):
     def create_project(
         self,
         project_id: str,
-        builder: Address,
+        builder: str,
         title: str,
         repo_url: str,
         deploy_url: str,
