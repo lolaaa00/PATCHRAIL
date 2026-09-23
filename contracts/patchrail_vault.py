@@ -47,6 +47,7 @@ Value-safety rules enforced here:
 """
 
 from dataclasses import dataclass
+import time
 from genlayer import *
 from typing import Any  # imported after `from genlayer import *` — see the
 # matching note in patchrail_release.py: the real GenVM runtime does not
@@ -80,7 +81,10 @@ class PatchrailVault(gl.Contract):
         self.release_address = release_address_text
 
     def _now(self) -> u64:
-        return u64(gl.vm.get_current_transaction_time())
+        try:
+            return u64(gl.vm.get_current_transaction_time())
+        except AttributeError:
+            return u64(int(time.time()))
 
     def _release(self):
         return gl.ContractAt(self.release_address).contract(IPatchrailRelease).view()
