@@ -310,7 +310,7 @@ class PatchrailRelease(gl.Contract):
     def create_project(
         self,
         project_id: str,
-        builder: str,
+        builder: Address,
         title: str,
         repo_url: str,
         deploy_url: str,
@@ -340,7 +340,10 @@ class PatchrailRelease(gl.Contract):
             raise Exception("deadline must be in the future")
 
         client = gl.message.sender_address
-        builder_addr = Address(builder)
+        # Wallet-shaped 0x arguments are encoded as native GenVM Address
+        # values by genlayer-js. Normalize through text so both the native
+        # ABI value and the test double produce the same stored address.
+        builder_addr = Address(str(builder))
         if str(builder_addr) == str(client):
             raise Exception("Builder and client must be different accounts")
 
